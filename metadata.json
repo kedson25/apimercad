@@ -1,0 +1,6 @@
+{
+  "name": "Gerador de Token Mercado Livre",
+  "description": "Gerador e gerenciador completo de tokens OAuth 2.0 PKCE para a API do Mercado Livre.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
