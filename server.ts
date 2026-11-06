@@ -579,7 +579,7 @@ Retorne um objeto JSON contendo exatamente os seguintes campos:
     const searchQuery = parsed.searchQuery || parsed.productName || 'produto';
     parsed.mercadoLivreSearchUrl = formatMercadoLivreUrl(searchQuery, parsed.mlbId);
 
-    // Search live Mercado Livre API for additional real MLBs of this product
+    // Search live Mercado Livre API for real MLBs of this product
     let liveMlbAds: any[] = [];
     try {
       const liveSearch = await searchMercadoLivreByQuery(searchQuery);
@@ -591,36 +591,15 @@ Retorne um objeto JSON contendo exatamente os seguintes campos:
       }
     } catch {}
 
-    // Format mlbList with direct item URLs (return all items found)
-    let rawList = [...liveMlbAds, ...(Array.isArray(parsed.mlbList) ? parsed.mlbList : [])];
-    if (rawList.length < 10) {
-      const baseMlb = (parsed.mlbId || 'MLB3849182374').replace(/\D/g, '') || '3849182374';
-      const baseNum = parseInt(baseMlb.slice(0, 8) || '38491823', 10);
-      const name = parsed.productName || 'Produto Mercado Livre';
-      const sellers = ['Loja Oficial', 'MercadoLíder Platinum', 'MercadoLíder Gold', 'Mercado Envios Full', 'Vendedor Verificado', 'Distribuidor Oficial'];
-      
-      const extraList = [
-        { mlbId: `MLB${baseNum}`, title: `${name} Original Lacrado Com Nota Fiscal`, price: parsed.priceRange?.split('-')[0] || 'R$ 129,90', condition: 'Novo', sellerType: sellers[0] },
-        { mlbId: `MLB${baseNum + 12}`, title: `Kit 2 Unidades ${name} Oferta do Dia`, price: 'R$ 229,90', condition: 'Novo', sellerType: sellers[1] },
-        { mlbId: `MLB${baseNum + 27}`, title: `${name} Frete Grátis Envio Imediato Full`, price: 'R$ 139,00', condition: 'Novo', sellerType: sellers[2] },
-        { mlbId: `MLB${baseNum + 41}`, title: `${name} Edição Especial Com Garantia`, price: 'R$ 159,90', condition: 'Novo', sellerType: sellers[3] },
-        { mlbId: `MLB${baseNum + 55}`, title: `Combo 3x ${name} Atacado E Varejo`, price: 'R$ 329,90', condition: 'Novo', sellerType: sellers[4] },
-        { mlbId: `MLB${baseNum + 68}`, title: `${name} Premium Pronta Entrega Brasil`, price: 'R$ 144,90', condition: 'Novo', sellerType: sellers[5] },
-        { mlbId: `MLB${baseNum + 82}`, title: `Kit ${name} + Acessórios Exclusivos`, price: 'R$ 179,00', condition: 'Novo', sellerType: sellers[0] },
-        { mlbId: `MLB${baseNum + 96}`, title: `${name} Linha Profissional Homologado`, price: 'R$ 189,90', condition: 'Novo', sellerType: sellers[1] },
-        { mlbId: `MLB${baseNum + 110}`, title: `2x ${name} Embalagem Lacrada NFe`, price: 'R$ 249,00', condition: 'Novo', sellerType: sellers[2] },
-        { mlbId: `MLB${baseNum + 124}`, title: `${name} Promoção Por Tempo Limitado`, price: 'R$ 119,90', condition: 'Novo', sellerType: sellers[3] },
-      ];
-
-      rawList = [...rawList, ...extraList];
-    }
-
+    // Only return real ads from live search or valid ads from response
+    const rawList = [...liveMlbAds, ...(Array.isArray(parsed.mlbList) ? parsed.mlbList : [])];
     const seenMlbIds = new Set<string>();
     parsed.mlbList = rawList
+      .filter((item: any) => item && (item.mlbId || item.title))
       .map((item: any) => {
-        const rawCode = String(item.mlbId || parsed.mlbId || 'MLB3849182374').toUpperCase().trim();
+        const rawCode = String(item.mlbId || '').toUpperCase().trim();
         const digits = rawCode.replace(/\D/g, '');
-        const mlbId = digits.length >= 6 ? `MLB${digits}` : rawCode;
+        const mlbId = (rawCode.startsWith('MLB') && digits.length >= 6) ? `MLB${digits}` : '';
         const title = item.title || parsed.productName || 'Anúncio Mercado Livre';
         return {
           mlbId,
@@ -628,10 +607,11 @@ Retorne um objeto JSON contendo exatamente os seguintes campos:
           price: item.price || 'Consulte valor',
           condition: item.condition || 'Novo',
           sellerType: item.sellerType || 'Vendedor Mercado Livre',
-          url: item.url || formatMercadoLivreUrl(title, mlbId),
+          url: item.url || (mlbId ? formatMercadoLivreUrl(title, mlbId) : formatMercadoLivreUrl(title)),
         };
       })
       .filter((item: any) => {
+        if (!item.mlbId) return true;
         if (seenMlbIds.has(item.mlbId)) return false;
         seenMlbIds.add(item.mlbId);
         return true;
@@ -675,10 +655,6 @@ function formatMercadoLivreUrl(queryOrTitle: string, mlbId?: string): string {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 
-  if (digits.length < 6 && cleanSlug) {
-    digits = String(computeDeterministicMlbBase(cleanSlug));
-  }
-
   if (digits.length >= 6) {
     if (cleanSlug) {
       return `https://produto.mercadolivre.com.br/MLB-${digits}-${cleanSlug}-_JM`;
@@ -686,24 +662,18 @@ function formatMercadoLivreUrl(queryOrTitle: string, mlbId?: string): string {
     return `https://produto.mercadolivre.com.br/MLB-${digits}`;
   }
 
+  const searchClean = (queryOrTitle || '').trim();
+  if (searchClean) {
+    return `https://lista.mercadolivre.com.br/${encodeURIComponent(searchClean)}`;
+  }
+
   return 'https://www.mercadolivre.com.br';
 }
 
-// Deterministic hash for generating consistent MLB IDs per query when live API is rate-limited
-function computeDeterministicMlbBase(text: string): number {
-  let hash = 0;
-  const clean = (text || 'produto').toLowerCase().trim();
-  for (let i = 0; i < clean.length; i++) {
-    hash = (hash * 31 + clean.charCodeAt(i)) % 900000000;
-  }
-  return 3100000000 + Math.abs(hash);
-}
-
-// Helper to search live Mercado Livre API or build structured MLB catalog results for a query
+// Helper to search live Mercado Livre API for a query
 async function searchMercadoLivreByQuery(rawQuery: string) {
   const query = (rawQuery || '').trim();
-  const baseNum = computeDeterministicMlbBase(query);
-  const searchUrl = formatMercadoLivreUrl(query, `MLB${baseNum}`);
+  const searchUrl = formatMercadoLivreUrl(query);
 
   // Attempt live query against Mercado Livre Brasil API (/sites/MLB/search)
   try {
@@ -740,88 +710,48 @@ async function searchMercadoLivreByQuery(rawQuery: string) {
     if (mlRes.ok) {
       const data = await mlRes.json();
       if (Array.isArray(data.results) && data.results.length > 0) {
-        const ads = data.results.slice(0, 6).map((r: any, idx: number) => {
-          const mlbId = (r.id || `MLB${baseNum + idx * 17}`).toString().toUpperCase();
-          const title = r.title || `${query} Original`;
-          const numPrice = typeof r.price === 'number' ? r.price : null;
-          const price = numPrice !== null
-            ? `R$ ${numPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : 'Consulte no anúncio';
-          const permalink = r.permalink && typeof r.permalink === 'string' && r.permalink.startsWith('http')
-            ? r.permalink
-            : formatMercadoLivreUrl(title, mlbId);
-          return {
-            mlbId,
-            title,
-            price,
-            url: permalink,
-            searchUrl: formatMercadoLivreUrl(title, mlbId),
-            condition: r.condition === 'used' ? 'Usado' : 'Novo',
-            sellerType: r.official_store_id ? 'Loja Oficial' : 'MercadoLíder',
-          };
-        });
+        const ads = data.results
+          .slice(0, 6)
+          .filter((r: any) => r && r.id && String(r.id).toUpperCase().startsWith('MLB'))
+          .map((r: any) => {
+            const mlbId = String(r.id).toUpperCase().trim();
+            const title = r.title || `${query} Original`;
+            const numPrice = typeof r.price === 'number' ? r.price : null;
+            const price = numPrice !== null
+              ? `R$ ${numPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : 'Consulte no anúncio';
+            const permalink = r.permalink && typeof r.permalink === 'string' && r.permalink.startsWith('http')
+              ? r.permalink
+              : formatMercadoLivreUrl(title, mlbId);
+            return {
+              mlbId,
+              title,
+              price,
+              url: permalink,
+              searchUrl: permalink,
+              condition: r.condition === 'used' ? 'Usado' : 'Novo',
+              sellerType: r.official_store_id ? 'Loja Oficial' : 'MercadoLíder',
+            };
+          });
 
-        return {
-          query,
-          primaryMlbId: ads[0].mlbId,
-          searchUrl: ads[0].url,
-          ads,
-        };
+        if (ads.length > 0) {
+          return {
+            query,
+            primaryMlbId: ads[0].mlbId,
+            searchUrl: ads[0].url,
+            ads,
+          };
+        }
       }
     }
-  } catch {
-    // Fallback to deterministic catalog generator below
-  }
+  } catch {}
 
-  const cleanTitle = query
-    .split(/\s+/)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
-
-  const fallbackAds = [
-    {
-      mlbId: `MLB${baseNum}`,
-      title: `${cleanTitle} Original Pronta Entrega Com Nota Fiscal`,
-      price: 'Ver oferta no ML',
-      url: formatMercadoLivreUrl(`${cleanTitle} Original`, `MLB${baseNum}`),
-      searchUrl,
-      condition: 'Novo',
-      sellerType: 'Mercado Envios Full',
-    },
-    {
-      mlbId: `MLB${baseNum + 23}`,
-      title: `${cleanTitle} Linha Profissional Garantia Oficial`,
-      price: 'Ver oferta no ML',
-      url: formatMercadoLivreUrl(`${cleanTitle} Profissional`, `MLB${baseNum + 23}`),
-      searchUrl,
-      condition: 'Novo',
-      sellerType: 'MercadoLíder Platinum',
-    },
-    {
-      mlbId: `MLB${baseNum + 49}`,
-      title: `Kit 2x ${cleanTitle} Atacado Frete Rápido`,
-      price: 'Ver oferta no ML',
-      url: formatMercadoLivreUrl(`Kit 2 ${cleanTitle}`, `MLB${baseNum + 49}`),
-      searchUrl,
-      condition: 'Novo',
-      sellerType: 'Loja Oficial',
-    },
-    {
-      mlbId: `MLB${baseNum + 78}`,
-      title: `${cleanTitle} Completo Homologado Envio Imediato`,
-      price: 'Ver oferta no ML',
-      url: formatMercadoLivreUrl(`${cleanTitle} Completo`, `MLB${baseNum + 78}`),
-      searchUrl,
-      condition: 'Novo',
-      sellerType: 'Vendedor Verificado',
-    },
-  ];
-
+  // No fake fallback ads: return direct ML search URL
   return {
     query,
-    primaryMlbId: fallbackAds[0].mlbId,
+    primaryMlbId: '',
     searchUrl,
-    ads: fallbackAds,
+    ads: [],
   };
 }
 
@@ -971,23 +901,14 @@ ${candidateList}
 Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
 {
   "visualOcrText": "Todo o texto real transcrito do rótulo/foto",
-  "productDescription": "O que o produto realmente é (ex: kit de anilhas, suplemento, lixeira, etc.)",
+  "productDescription": "O que o produto realmente é",
   "mercadoLivreTitle": "Título oficial do produto no Mercado Livre Brasil",
   "keywords": ["palavra1", "palavra2", "palavra3"],
-  "matchedId": "O ID exato vencedor da lista do CSV",
+  "matchedId": "ID_REAL_DO_CSV_OU_NULL",
   "matchedItem": "A descrição exata do item na lista do CSV",
   "matchedKeywords": ["palavras-chave que batem com o item vencedor"],
   "confidenceScore": 95,
-  "reasoning": "Explicação detalhada comprovando o casamento do título do Mercado Livre dividido em palavras-chave com a descrição do item da planilha",
-  "mlbId": "MLB123456789 (código estimado no Mercado Livre)",
-  "relatedMercadoLivreAds": [
-    {
-      "title": "Título comercial do anúncio no Mercado Livre",
-      "price": "R$ 49,90",
-      "relevance": "Alta",
-      "condition": "Novo"
-    }
-  ]
+  "reasoning": "Explicação comprovando a correspondência do item com a descrição da planilha"
 }`;
 
     let rawText = '';
@@ -1050,18 +971,29 @@ Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
     parsed.keywords = activeKeywords;
     parsed.mercadoLivreTitle = mlTitle || parsed.matchedItem || 'Produto Mercado Livre';
 
+    // Map of strictly valid CSV IDs
+    const validCsvMap = new Map(csvItems.map((item) => [String(item.id).trim(), item]));
+
+    // Check if Gemini suggested an ID that genuinely exists in csvItems
+    const geminiId = String(parsed.matchedId || '').trim();
+    let winner = validCsvMap.get(geminiId);
+
     // Calculate deterministic keyword overlap for every candidate in csvItems
     const scoredCandidates = csvItems.map((item) => {
       const { matchedKeywords, matchCount } = calculateKeywordOverlap(item.itens || '', activeKeywords);
-      const isGeminiPick = String(item.id).trim() === String(parsed.matchedId).trim();
-      // Confidence score based on keyword match count and Gemini selection
+      const isGeminiPick = winner ? String(item.id).trim() === String(winner.id).trim() : false;
+      const hasCsvMlb = Boolean((item.mlbId || item.mlb || '').trim());
       let score = Math.min(100, Math.round((matchCount / Math.max(activeKeywords.length, 1)) * 100));
       if (isGeminiPick) {
         score = Math.max(score, parsed.confidenceScore || 85);
       }
+      if (hasCsvMlb && matchCount >= 2) {
+        score += 35;
+      }
       return {
         id: item.id,
         itens: item.itens,
+        mlb: (item.mlbId || item.mlb || '').trim(),
         matchedKeywords,
         matchCount,
         confidenceScore: score,
@@ -1077,27 +1009,30 @@ Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
       return b.confidenceScore - a.confidenceScore;
     });
 
-    // Verify winner: only accept an ID if it actually has keyword matches (matchCount > 0)
-    let winner = scoredCandidates.find(c => c.isGeminiPick && c.matchCount > 0);
-    if (!winner) {
-      if (scoredCandidates.length > 0 && scoredCandidates[0].matchCount > 0) {
-        winner = scoredCandidates[0];
-      }
+    // Verify winner: if Gemini's choice doesn't exist in CSV or has 0 matchCount, pick the highest valid candidate
+    if (!winner || calculateKeywordOverlap(winner.itens || '', activeKeywords).matchCount === 0) {
+      const topCand = scoredCandidates.find(c => c.matchCount > 0);
+      winner = topCand ? validCsvMap.get(String(topCand.id).trim()) : undefined;
     }
 
-    if (winner && winner.matchCount > 0) {
+    if (winner) {
+      const { matchedKeywords } = calculateKeywordOverlap(winner.itens || '', activeKeywords);
       parsed.matchedId = winner.id;
       parsed.matchedItem = winner.itens;
-      parsed.matchedKeywords = winner.matchedKeywords;
-      parsed.confidenceScore = Math.max(parsed.confidenceScore || 0, winner.confidenceScore || 0);
+      parsed.matchedKeywords = matchedKeywords;
+      parsed.confidenceScore = Math.max(parsed.confidenceScore || 75, 75);
+      // ONLY accept real MLB from Column G of the CSV
+      parsed.mlbId = (winner.mlbId || winner.mlb || '').trim();
     } else {
+      // NO REAL MATCH FOUND IN CSV - NEVER OUTPUT FICTITIOUS IDS
       parsed.matchedId = '';
       parsed.matchedItem = '';
       parsed.matchedKeywords = [];
       parsed.confidenceScore = 0;
+      parsed.mlbId = '';
     }
 
-    // Only return candidates that actually matched (matchCount > 0), limited to top 50 for fast response
+    // Only return candidates that actually matched (matchCount > 0)
     parsed.allRankedMatches = scoredCandidates
       .filter(c => c.matchCount > 0)
       .slice(0, 50)
@@ -1110,41 +1045,21 @@ Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
         reasoning: `${c.matchCount} palavra(s)-chave coincidente(s): ${c.matchedKeywords.join(', ')}`,
       }));
 
-    // Process Mercado Livre ads with MLB IDs and direct URLs
-    const rawAds = Array.isArray(parsed.relatedMercadoLivreAds) ? parsed.relatedMercadoLivreAds : [];
-    const baseMlbStr = (parsed.mlbId || 'MLB4809283741').replace(/\D/g, '') || '4809283741';
-    const baseNum = parseInt(baseMlbStr.slice(0, 8) || '48092837', 10);
-
-    if (rawAds.length === 0 && parsed.mercadoLivreTitle) {
-      rawAds.push(
-        { mlbId: `MLB${baseNum}`, title: `${parsed.mercadoLivreTitle} Original Com Garantia`, price: 'R$ 79,90', relevance: 'Alta', condition: 'Novo', sellerType: 'Loja Oficial' },
-        { mlbId: `MLB${baseNum + 18}`, title: `Kit 2 Unidades ${parsed.mercadoLivreTitle}`, price: 'R$ 139,90', relevance: 'Média', condition: 'Novo', sellerType: 'MercadoLíder Gold' },
-        { mlbId: `MLB${baseNum + 35}`, title: `${parsed.mercadoLivreTitle} Frete Grátis Envio Rápido`, price: 'R$ 89,00', relevance: 'Alta', condition: 'Novo', sellerType: 'Mercado Envios Full' }
-      );
+    // Build real ads list: prioritize the real Column G MLB from the CSV
+    const realAds: any[] = [];
+    if (parsed.mlbId) {
+      realAds.push({
+        mlbId: parsed.mlbId,
+        title: `[CSV · ID ${parsed.matchedId}] ${parsed.matchedItem}`,
+        price: winner?.valorReal ? `R$ ${winner.valorReal}` : 'No CSV',
+        url: formatMercadoLivreUrl(parsed.matchedItem || parsed.mercadoLivreTitle, parsed.mlbId),
+        searchUrl: formatMercadoLivreUrl(parsed.matchedItem || parsed.mercadoLivreTitle, parsed.mlbId),
+        condition: 'Novo',
+      });
     }
 
-    parsed.relatedMercadoLivreAds = rawAds.map((ad: any, idx: number) => {
-      const adTitle = ad.title || parsed.mercadoLivreTitle || 'Anúncio Mercado Livre';
-      const mlbId = ad.mlbId || `MLB${baseNum + idx * 12}`;
-      const { matchedKeywords, matchCount } = calculateKeywordOverlap(adTitle, activeKeywords);
-      return {
-        mlbId,
-        title: adTitle,
-        price: ad.price || 'Consulte anúncio',
-        url: formatMercadoLivreUrl(adTitle, mlbId),
-        matchedKeywords,
-        matchCount,
-        relevance: ad.relevance || 'Alta',
-        condition: ad.condition || 'Novo',
-        sellerType: ad.sellerType || 'Vendedor Verificado',
-      };
-    });
-
-    if (parsed.mercadoLivreTitle) {
-      parsed.mercadoLivreSearchUrl = formatMercadoLivreUrl(parsed.mercadoLivreTitle, parsed.mlbId);
-    } else if (parsed.matchedItem) {
-      parsed.mercadoLivreSearchUrl = formatMercadoLivreUrl(parsed.matchedItem, parsed.mlbId);
-    }
+    parsed.relatedMercadoLivreAds = realAds;
+    parsed.mercadoLivreSearchUrl = formatMercadoLivreUrl(parsed.mercadoLivreTitle || parsed.matchedItem || 'produto', parsed.mlbId);
 
     return res.json({
       success: true,
@@ -1202,8 +1117,7 @@ Retorne OBRIGATORIAMENTE um JSON puro com:
       "relevance": "Alta",
       "condition": "Novo"
     }
-  ],
-  "matchingIds": ["ID1", "ID2"]
+  ]
 }`;
 
     let rawText = '';
@@ -1252,41 +1166,53 @@ Retorne OBRIGATORIAMENTE um JSON puro com:
       }
     } catch {}
 
-    // Process ads with direct item URLs and keyword matching
+    // Process real ads from live query or model
     const rawAds = [...liveKitAds, ...(Array.isArray(parsed.ads) ? parsed.ads : [])];
-    const baseNum = 4901823741;
-    parsed.ads = rawAds.map((ad: any, idx: number) => {
-      const title = ad.title || kitTitle;
-      const mlbId = ad.mlbId || `MLB${baseNum + idx * 16}`;
-      const { matchedKeywords, matchCount } = calculateKeywordOverlap(title, kitKeywords);
-      return {
-        mlbId,
-        title,
-        price: ad.price || parsed.estimatedPrice || 'Consulte anúncio',
-        url: ad.url || formatMercadoLivreUrl(title, mlbId),
-        matchedKeywords,
-        matchCount,
-        relevance: ad.relevance || 'Alta',
-        condition: ad.condition || 'Novo',
-      };
-    });
-    parsed.mercadoLivreSearchUrl =
-      parsed.ads[0]?.url || formatMercadoLivreUrl(kitTitle, parsed.ads[0]?.mlbId);
+    const seenAdMlbs = new Set<string>();
+    parsed.ads = rawAds
+      .filter((ad: any) => ad && (ad.title || ad.mlbId))
+      .map((ad: any) => {
+        const title = ad.title || kitTitle;
+        const rawCode = String(ad.mlbId || '').toUpperCase().trim();
+        const digits = rawCode.replace(/\D/g, '');
+        const mlbId = (rawCode.startsWith('MLB') && digits.length >= 6) ? `MLB${digits}` : '';
+        const { matchedKeywords, matchCount } = calculateKeywordOverlap(title, kitKeywords);
+        return {
+          mlbId,
+          title,
+          price: ad.price || parsed.estimatedPrice || 'Consulte anúncio',
+          url: ad.url || (mlbId ? formatMercadoLivreUrl(title, mlbId) : formatMercadoLivreUrl(title)),
+          matchedKeywords,
+          matchCount,
+          relevance: ad.relevance || 'Alta',
+          condition: ad.condition || 'Novo',
+        };
+      })
+      .filter((ad: any) => {
+        if (!ad.mlbId) return true;
+        if (seenAdMlbs.has(ad.mlbId)) return false;
+        seenAdMlbs.add(ad.mlbId);
+        return true;
+      });
 
-    // Match components against the CSV items (banco desti)
+    parsed.mercadoLivreSearchUrl =
+      parsed.ads[0]?.url || formatMercadoLivreUrl(kitTitle);
+
+    // Match components strictly against the real CSV items (banco desti)
     const matchingCsvItems: any[] = [];
-    const suggestedIds = new Set(Array.isArray(parsed.matchingIds) ? parsed.matchingIds.map(String) : []);
+    const validCsvMap = new Map((csvItems as any[]).map((it) => [String(it.id).trim(), it]));
 
     for (const it of csvItems as any[]) {
       const { matchedKeywords, matchCount } = calculateKeywordOverlap(it.itens || '', kitKeywords);
-      const isSuggested = suggestedIds.has(String(it.id));
-      if (matchCount >= 2 || isSuggested) {
+      // Strictly require at least 2 keyword matches from the actual CSV item text
+      if (matchCount >= 2) {
         matchingCsvItems.push({
           id: it.id,
           itens: it.itens,
           valorReal: it.valorReal,
+          mlb: it.mlbId || it.mlb || '',
           matchedKeywords,
-          matchCount: isSuggested ? matchCount + 2 : matchCount,
+          matchCount,
         });
       }
     }

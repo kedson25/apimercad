@@ -36,54 +36,15 @@ function normalizeText(text: string): string {
     .trim();
 }
 
-function computeClientMlbBase(text: string): number {
-  let hash = 0;
-  const clean = (text || 'produto').toLowerCase().trim();
-  for (let i = 0; i < clean.length; i++) {
-    hash = (hash * 31 + clean.charCodeAt(i)) % 900000000;
-  }
-  return 3100000000 + Math.abs(hash);
-}
-
 function buildInstantMlbResult(rawQuery: string): MlbNameSearchItemResult {
   const query = rawQuery.trim();
-  const baseNum = computeClientMlbBase(query);
   const searchUrl = formatMercadoLivreUrl(query);
-  const cleanTitle = query
-    .split(/\s+/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
 
   return {
     query,
-    primaryMlbId: `MLB${baseNum}`,
+    primaryMlbId: '',
     searchUrl,
-    ads: [
-      {
-        mlbId: `MLB${baseNum}`,
-        title: `${cleanTitle} Original Pronta Entrega`,
-        price: 'Ver no ML',
-        url: formatMercadoLivreUrl(`${cleanTitle} Original`, `MLB${baseNum}`),
-        searchUrl,
-        condition: 'Novo',
-      },
-      {
-        mlbId: `MLB${baseNum + 23}`,
-        title: `${cleanTitle} Profissional Com Garantia`,
-        price: 'Ver no ML',
-        url: formatMercadoLivreUrl(`${cleanTitle} Profissional`, `MLB${baseNum + 23}`),
-        searchUrl,
-        condition: 'Novo',
-      },
-      {
-        mlbId: `MLB${baseNum + 49}`,
-        title: `Kit 2x ${cleanTitle} Envio Rápido`,
-        price: 'Ver no ML',
-        url: formatMercadoLivreUrl(`Kit 2 ${cleanTitle}`, `MLB${baseNum + 49}`),
-        searchUrl,
-        condition: 'Novo',
-      },
-    ],
+    ads: [],
   };
 }
 
@@ -599,20 +560,24 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
                         <span className="text-xs font-semibold text-neutral-900 dark:text-white">
                           {group.rawQuery}
                         </span>
-                        <span className="text-xs font-mono text-neutral-500 tabular-nums">
-                          · {group.mlbData.primaryMlbId}
-                        </span>
+                        {group.mlbData.primaryMlbId && (
+                          <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                            · {group.mlbData.primaryMlbId}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => copyToClipboard(group.mlbData.primaryMlbId, `p-mlb-${group.queryIdx}`)}
-                          className="px-2 py-1 text-[11px] font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
-                        >
-                          {copiedId === `p-mlb-${group.queryIdx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                          <span>Copiar MLB</span>
-                        </button>
+                        {group.mlbData.primaryMlbId && (
+                          <button
+                            type="button"
+                            onClick={() => copyToClipboard(group.mlbData.primaryMlbId, `p-mlb-${group.queryIdx}`)}
+                            className="px-2 py-1 text-[11px] font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+                          >
+                            {copiedId === `p-mlb-${group.queryIdx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                            <span>Copiar MLB</span>
+                          </button>
+                        )}
 
                         <a
                           href={group.mlbData.searchUrl}
@@ -634,49 +599,61 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
                           Códigos MLB & Links ({group.mlbData.ads.length})
                         </span>
 
-                        <div className="divide-y divide-neutral-100 dark:divide-neutral-800/60">
-                          {group.mlbData.ads.map((ad, adIdx) => (
-                            <div
-                              key={adIdx}
-                              className="py-2 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono font-semibold text-neutral-900 dark:text-neutral-200 tabular-nums">
-                                    {ad.mlbId}
-                                  </span>
-                                  <span className="text-[11px] font-mono text-neutral-500 tabular-nums">
-                                    {ad.price}
-                                  </span>
+                        {group.mlbData.ads.length === 0 ? (
+                          <p className="text-xs text-neutral-500 italic py-2">
+                            Nenhum código MLB cadastrado no CSV ou anúncio direto encontrado para este termo. Use "Abrir no ML" para pesquisar.
+                          </p>
+                        ) : (
+                          <div className="divide-y divide-neutral-100 dark:divide-neutral-800/60">
+                            {group.mlbData.ads.map((ad, adIdx) => (
+                              <div
+                                key={adIdx}
+                                className="py-2 first:pt-0 last:pb-0 flex items-center justify-between gap-3"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    {ad.mlbId && (
+                                      <span className="text-xs font-mono font-semibold text-neutral-900 dark:text-neutral-200 tabular-nums">
+                                        {ad.mlbId}
+                                      </span>
+                                    )}
+                                    {ad.price && (
+                                      <span className="text-[11px] font-mono text-neutral-500 tabular-nums">
+                                        {ad.price}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-neutral-600 dark:text-neutral-400 truncate">
+                                    {ad.title}
+                                  </p>
                                 </div>
-                                <p className="text-xs text-neutral-600 dark:text-neutral-400 truncate">
-                                  {ad.title}
-                                </p>
-                              </div>
 
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => copyToClipboard(ad.mlbId, `mlb-${group.queryIdx}-${adIdx}`)}
-                                  className="px-2 py-1 text-[11px] font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
-                                >
-                                  {copiedId === `mlb-${group.queryIdx}-${adIdx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                                  <span>MLB</span>
-                                </button>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {ad.mlbId && (
+                                    <button
+                                      type="button"
+                                      onClick={() => copyToClipboard(ad.mlbId, `mlb-${group.queryIdx}-${adIdx}`)}
+                                      className="px-2 py-1 text-[11px] font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+                                    >
+                                      {copiedId === `mlb-${group.queryIdx}-${adIdx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                                      <span>MLB</span>
+                                    </button>
+                                  )}
 
-                                <a
-                                  href={ad.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="px-2 py-1 text-[11px] font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 flex items-center gap-1"
-                                >
-                                  <span>Link</span>
-                                  <ExternalLink className="w-3 h-3" />
-                                </a>
+                                  <a
+                                    href={ad.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-2 py-1 text-[11px] font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 flex items-center gap-1"
+                                  >
+                                    <span>Link</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </div>
                               </div>
-                            </div>
-                          ))}
-                        </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       {/* RIGHT: CSV MATCHES (ONLY RENDERED IF MATCH IS FOUND, WITH PAGINATION) */}
@@ -882,7 +859,7 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
           </div>
         )}
 
-        {/* ONLY DISPLAY ID IF A MATCH WAS FOUND */}
+        {/* ONLY DISPLAY ID IF A REAL MATCH FROM CSV WAS FOUND */}
         {matchResult && !isMatching && matchResult.matchedId && (
           <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -892,7 +869,7 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
                 </span>
                 {matchResult.mlbId && (
                   <span className="text-xs font-mono text-neutral-500 tabular-nums">
-                    · {matchResult.mlbId}
+                    · Coluna G (CSV): {matchResult.mlbId}
                   </span>
                 )}
               </div>
@@ -921,6 +898,13 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
             </div>
+          </div>
+        )}
+
+        {matchResult && !isMatching && !matchResult.matchedId && (
+          <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-neutral-400 shrink-0" />
+            <span>Nenhum item correspondente encontrado na base de dados do CSV para esta foto. Nenhum ID fictício foi atribuído.</span>
           </div>
         )}
       </div>

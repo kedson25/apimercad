@@ -49,19 +49,8 @@ export function extractMlbCodes(rawColumnG?: string | null): string[] {
 }
 
 /**
- * Gera um código MLB numérico determinístico a partir do título caso a linha não tenha MLB na Coluna G
- */
-export function fallbackMlbDigitsFromText(text: string): string {
-  let hash = 0;
-  const clean = (text || 'produto').toLowerCase().trim();
-  for (let i = 0; i < clean.length; i++) {
-    hash = (hash * 31 + clean.charCodeAt(i)) % 900000000;
-  }
-  return String(3100000000 + Math.abs(hash));
-}
-
-/**
  * Formata o link DIRETO do anúncio específico no Mercado Livre Brasil (https://produto.mercadolivre.com.br/MLB-...)
+ * Se não houver código MLB real (Coluna G), direciona para a busca real no Mercado Livre sem inventar IDs fictícios.
  */
 export function formatMercadoLivreUrl(queryOrTitle: string, mlbId?: string | null): string {
   if (queryOrTitle && /^https?:\/\//i.test(queryOrTitle.trim())) {
@@ -89,16 +78,18 @@ export function formatMercadoLivreUrl(queryOrTitle: string, mlbId?: string | nul
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 
-  // Se não veio MLB explícito mas temos o título do produto, gera o MLB correspondente para abrir o anúncio específico
-  if (digits.length < 6 && cleanSlug) {
-    digits = fallbackMlbDigitsFromText(cleanSlug);
-  }
-
+  // Link direto para o anúncio APENAS quando há um código MLB real
   if (digits.length >= 6) {
     if (cleanSlug) {
       return `https://produto.mercadolivre.com.br/MLB-${digits}-${cleanSlug}-_JM`;
     }
     return `https://produto.mercadolivre.com.br/MLB-${digits}`;
+  }
+
+  // Sem MLB real: link direto para a busca dos anúncios no Mercado Livre
+  const searchClean = (queryOrTitle || '').trim();
+  if (searchClean) {
+    return `https://lista.mercadolivre.com.br/${encodeURIComponent(searchClean)}`;
   }
 
   return 'https://www.mercadolivre.com.br';
