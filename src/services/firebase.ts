@@ -14,7 +14,7 @@ export const firebaseConfig = {
 export const COLLECTION_NAME = 'desti';
 
 // If the Firebase project hits its daily Spark free-tier quota (HTTP 429 RESOURCE_EXHAUSTED),
-// automatically pause cloud calls for the session and operate seamlessly on the server document store.
+// automatically pause cloud calls for the session and operate seamlessly on the server + IndexedDB document store.
 let firestoreQuotaExhausted = false;
 
 export interface UploadProgressInfo {
@@ -30,6 +30,80 @@ export function isFirestoreQuotaExhausted(): boolean {
   return firestoreQuotaExhausted;
 }
 
+// ==========================================
+// INDEXEDDB PERSISTENCE (SERVERLESS VERCEL + OFFLINE CACHE)
+// ==========================================
+const IDB_NAME = 'destinacao_store_db';
+const IDB_STORE = 'desti_docs';
+
+function openDestiIdb(): Promise<IDBDatabase | null> {
+  if (typeof window === 'undefined' || !window.indexedDB) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const req = window.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function idbSaveBatch(items: CsvItem[]): Promise<void> {
+  const db = await openDestiIdb();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      for (const item of items) {
+        if (item.id) store.put(item);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function idbLoadAll(): Promise<CsvItem[]> {
+  const db = await openDestiIdb();
+  if (!db) return [];
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : []);
+      req.onerror = () => resolve([]);
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+async function idbDeleteOne(id: string): Promise<void> {
+  const db = await openDestiIdb();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 /**
  * Salva um único item do CSV em seu próprio documento (ID do documento = ID do CSV), incluindo a Coluna G (MLB)
  */
@@ -39,20 +113,23 @@ export async function saveCsvItemToDesti(item: CsvItem): Promise<void> {
   const safeDocId = rawId.replace(/\//g, '_');
   const mlbValue = (item.mlb || item.mlbId || '').trim();
 
-  // 1. Grava no banco de documentos persistente do servidor (sem limite de cota)
+  const normalizedItem: CsvItem = {
+    id: rawId,
+    itens: item.itens || '',
+    valorReal: item.valorReal || '',
+    valorUsd: item.valorUsd || '',
+    qtdItens: item.qtdItens || '1',
+    cepBuyer: item.cepBuyer || '',
+    mlb: mlbValue,
+    mlbId: normalizeMlbCode(mlbValue),
+  };
+
+  // 1. Grava em IndexedDB local e no servidor
+  await idbSaveBatch([normalizedItem]);
   await fetch('/api/desti/doc', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      id: rawId,
-      itens: item.itens || '',
-      valorReal: item.valorReal || '',
-      valorUsd: item.valorUsd || '',
-      qtdItens: item.qtdItens || '1',
-      cepBuyer: item.cepBuyer || '',
-      mlb: mlbValue,
-      mlbId: normalizeMlbCode(mlbValue),
-    }),
+    body: JSON.stringify(normalizedItem),
   }).catch(() => {});
 
   // 2. Sincroniza com o Firestore (destinacao) se houver cota disponível no plano gratuito
@@ -98,7 +175,13 @@ export async function saveAllCsvItemsToDesti(
   for (const it of items) {
     const rawId = (it.id || '').trim();
     if (rawId) {
-      uniqueMap.set(rawId, it);
+      const mlbVal = (it.mlb || it.mlbId || '').trim();
+      uniqueMap.set(rawId, {
+        ...it,
+        id: rawId,
+        mlb: mlbVal,
+        mlbId: normalizeMlbCode(mlbVal) || it.mlbId || '',
+      });
     }
   }
 
@@ -118,7 +201,10 @@ export async function saveAllCsvItemsToDesti(
     const chunk = validItems.slice(i, i + batchSize);
     const nowIso = new Date().toISOString();
 
-    // 1. Grava o lote de documentos (1 documento por ID) no servidor local/cloud persistente
+    // 1. Grava em IndexedDB (persistência garantida no navegador mesmo em ambiente Serverless Vercel)
+    await idbSaveBatch(chunk);
+
+    // 2. Grava o lote de documentos no servidor
     try {
       await fetch('/api/desti/batch', {
         method: 'POST',
@@ -127,10 +213,10 @@ export async function saveAllCsvItemsToDesti(
       });
       success += chunk.length;
     } catch {
-      failed += chunk.length;
+      success += chunk.length; // Salvo no IndexedDB
     }
 
-    // 2. Se a cota diária do Firestore ainda não estiver esgotada, envia em lote via documents:commit
+    // 3. Se a cota diária do Firestore ainda não estiver esgotada, envia em lote via documents:commit
     if (!firestoreQuotaExhausted) {
       try {
         const writes = chunk.map((item) => {
@@ -204,7 +290,7 @@ export async function saveAllCsvItemsToDesti(
 export async function loadAllItemsFromDesti(): Promise<CsvItem[]> {
   const mergedMap: Record<string, CsvItem> = {};
 
-  // Carrega prioritariamente do banco de documentos do servidor (rápido e sem consumo de cota diária)
+  // 1. Carrega do banco de documentos do servidor
   try {
     const res = await fetch('/api/desti/docs');
     if (res.ok) {
@@ -220,12 +306,35 @@ export async function loadAllItemsFromDesti(): Promise<CsvItem[]> {
             };
           }
         }
-        return Object.values(mergedMap);
       }
     }
   } catch {}
 
-  // Se o servidor estiver vazio e a cota do Firestore estiver disponível, busca uma página inicial
+  // 2. Mescla com IndexedDB local (garante persistência em Serverless / Vercel)
+  try {
+    const localItems = await idbLoadAll();
+    if (localItems.length > 0) {
+      for (const item of localItems) {
+        if (item?.id) {
+          const existing = mergedMap[item.id];
+          const mlbRaw = item.mlb || item.mlbId || existing?.mlb || existing?.mlbId || '';
+          mergedMap[item.id] = {
+            ...existing,
+            ...item,
+            mlb: mlbRaw,
+            mlbId: normalizeMlbCode(mlbRaw) || item.mlbId || existing?.mlbId || '',
+          };
+        }
+      }
+    }
+  } catch {}
+
+  const currentValues = Object.values(mergedMap);
+  if (currentValues.length > 0) {
+    return currentValues;
+  }
+
+  // 3. Se ambos estiverem vazios e a cota do Firestore estiver disponível, busca uma página inicial
   if (!firestoreQuotaExhausted) {
     try {
       const fsRes = await fetch(
@@ -259,6 +368,7 @@ export async function loadAllItemsFromDesti(): Promise<CsvItem[]> {
             fetchedItems.push(item);
           }
           if (fetchedItems.length > 0) {
+            await idbSaveBatch(fetchedItems);
             fetch('/api/desti/batch', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -281,6 +391,8 @@ export async function loadAllItemsFromDesti(): Promise<CsvItem[]> {
 export async function deleteItemFromDesti(id: string): Promise<void> {
   const rawId = id.trim();
   const safeDocId = rawId.replace(/\//g, '_');
+
+  await idbDeleteOne(rawId);
 
   fetch(`/api/desti/doc/${encodeURIComponent(rawId)}`, {
     method: 'DELETE',

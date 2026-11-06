@@ -1,5 +1,4 @@
 import express, { Request, Response } from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'url';
@@ -15,8 +14,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Persistent document store by ID (mirrors Firestore collection 'desti' where each ID is a document)
-const DESTI_STORE_FILE = path.join(__dirname, 'desti_documents.json');
+// Persistent document store by ID (compatible with both local disk and Vercel /tmp runtime)
+const LOCAL_DESTI_FILE = path.join(__dirname, 'desti_documents.json');
+const TMP_DESTI_FILE = '/tmp/desti_documents.json';
 
 interface DestiDocument {
   id: string;
@@ -30,25 +30,44 @@ interface DestiDocument {
   updatedAt: string;
 }
 
+let memoryDestiCache: Record<string, DestiDocument> | null = null;
+
 function readDestiStore(): Record<string, DestiDocument> {
+  if (memoryDestiCache) {
+    return memoryDestiCache;
+  }
   try {
-    if (fs.existsSync(DESTI_STORE_FILE)) {
-      const raw = fs.readFileSync(DESTI_STORE_FILE, 'utf-8');
-      return JSON.parse(raw);
+    if (process.env.VERCEL && fs.existsSync(TMP_DESTI_FILE)) {
+      const raw = fs.readFileSync(TMP_DESTI_FILE, 'utf-8');
+      memoryDestiCache = JSON.parse(raw);
+      return memoryDestiCache!;
+    }
+    if (fs.existsSync(LOCAL_DESTI_FILE)) {
+      const raw = fs.readFileSync(LOCAL_DESTI_FILE, 'utf-8');
+      memoryDestiCache = JSON.parse(raw);
+      return memoryDestiCache!;
     }
   } catch {}
-  return {};
+  memoryDestiCache = {};
+  return memoryDestiCache;
 }
 
 function writeDestiStore(store: Record<string, DestiDocument>) {
+  memoryDestiCache = store;
+  const targetFile = process.env.VERCEL ? TMP_DESTI_FILE : LOCAL_DESTI_FILE;
   try {
-    fs.writeFileSync(DESTI_STORE_FILE, JSON.stringify(store, null, 2), 'utf-8');
+    fs.writeFileSync(targetFile, JSON.stringify(store, null, 2), 'utf-8');
   } catch {}
 }
 
-// Initialize Google Gemini AI dynamically with process.env.GEMINI_API_KEY
+// Initialize Google Gemini AI dynamically using GEMINI_API_KEY from Vercel / environment
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6IWPYzk05vyDrBpXHaNeKhXxCG_eqF5ayWwS3faQz64-g';
+  const apiKey = (
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    'AQ.Ab8RN6IWPYzk05vyDrBpXHaNeKhXxCG_eqF5ayWwS3faQz64-g'
+  ).trim();
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -131,11 +150,17 @@ app.delete('/api/desti/doc/:id', (req: Request, res: Response) => {
 });
 
 
-// Default credentials from user prompt
+// Credentials dynamically resolved from Vercel Environment Variables (ML_CLIENT_ID, ML_CLIENT_SECRET, ML_REDIRECT_URI)
 const DEFAULT_CONFIG = {
-  clientId: process.env.ML_CLIENT_ID || '1316710088175307',
-  clientSecret: process.env.ML_CLIENT_SECRET || 'hqnA1JYJ0ZL0I21dk4qj93IGiOjUN1L5',
-  redirectUri: process.env.ML_REDIRECT_URI || 'http://localhost:3005/callback',
+  get clientId() {
+    return (process.env.ML_CLIENT_ID || '1316710088175307').trim();
+  },
+  get clientSecret() {
+    return (process.env.ML_CLIENT_SECRET || 'hqnA1JYJ0ZL0I21dk4qj93IGiOjUN1L5').trim();
+  },
+  get redirectUri() {
+    return (process.env.ML_REDIRECT_URI || 'http://localhost:3005/callback').trim();
+  },
   pkceEnabled: true,
 };
 
@@ -151,17 +176,7 @@ interface OAuthSession {
 
 const activeSessions = new Map<string, OAuthSession>();
 
-// Cleanup stale sessions older than 1 hour
-setInterval(() => {
-  const oneHourAgo = Date.now() - 3600 * 1000;
-  for (const [key, session] of activeSessions.entries()) {
-    if (session.createdAt < oneHourAgo) {
-      activeSessions.delete(key);
-    }
-  }
-}, 10 * 60 * 1000);
-
-// Global latest token memory initialized with active tokens provided by user
+// Global latest token memory initialized with Vercel environment variables (ML_ACCESS_TOKEN, ML_REFRESH_TOKEN)
 let latestTokens: {
   accessToken?: string;
   refreshToken?: string;
@@ -172,14 +187,57 @@ let latestTokens: {
   scope?: string;
   updatedAt?: number;
 } = {
-  accessToken: process.env.ML_ACCESS_TOKEN || 'APP_USR-1316710088175307-110419-8814e302652d2a7ed839336b4571b933-1690967397',
-  refreshToken: process.env.ML_REFRESH_TOKEN || 'TG-6aebba2ae6fe400001b97438-1690967397',
+  accessToken: (process.env.ML_ACCESS_TOKEN || 'APP_USR-1316710088175307-110419-8814e302652d2a7ed839336b4571b933-1690967397').trim(),
+  refreshToken: (process.env.ML_REFRESH_TOKEN || 'TG-6aebba2ae6fe400001b97438-1690967397').trim(),
   expiresIn: 21600,
   expiresAt: 1793855113221,
   userId: 1690967397,
   tokenType: 'Bearer',
   updatedAt: Date.now(),
 };
+
+// Automatically refreshes ML_ACCESS_TOKEN using ML_REFRESH_TOKEN + ML_CLIENT_ID + ML_CLIENT_SECRET when needed
+async function refreshMlTokenIfPossible(): Promise<string | null> {
+  const refreshToken = (latestTokens.refreshToken || process.env.ML_REFRESH_TOKEN || '').trim();
+  const clientId = DEFAULT_CONFIG.clientId;
+  const clientSecret = DEFAULT_CONFIG.clientSecret;
+  if (!refreshToken || !clientId || !clientSecret) return null;
+
+  try {
+    const refreshParams = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+    });
+    const refRes = await fetch('https://api.mercadolibre.com/oauth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: refreshParams.toString(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (refRes.ok) {
+      const refData = await refRes.json();
+      if (refData.access_token) {
+        latestTokens = {
+          accessToken: refData.access_token,
+          refreshToken: refData.refresh_token || refreshToken,
+          expiresIn: refData.expires_in,
+          expiresAt: refData.expires_in ? Date.now() + refData.expires_in * 1000 : undefined,
+          userId: refData.user_id || latestTokens.userId,
+          tokenType: refData.token_type || 'Bearer',
+          scope: refData.scope,
+          updatedAt: Date.now(),
+        };
+        return refData.access_token;
+      }
+    }
+  } catch {}
+  return null;
+}
 
 // Helper: PKCE generation
 function generatePKCE() {
@@ -622,20 +680,35 @@ async function searchMercadoLivreByQuery(rawQuery: string) {
 
   // Attempt live query against Mercado Livre Brasil API (/sites/MLB/search)
   try {
+    const currentToken = (latestTokens.accessToken || process.env.ML_ACCESS_TOKEN || '').trim();
     const headers: Record<string, string> = {
       Accept: 'application/json',
     };
-    if (latestTokens.accessToken) {
-      headers.Authorization = `Bearer ${latestTokens.accessToken}`;
+    if (currentToken) {
+      headers.Authorization = `Bearer ${currentToken}`;
     }
 
-    const mlRes = await fetch(
+    let mlRes = await fetch(
       `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(query)}&limit=6`,
       {
         headers,
         signal: AbortSignal.timeout(4500),
       }
     );
+
+    if ((mlRes.status === 401 || mlRes.status === 403) && (latestTokens.refreshToken || process.env.ML_REFRESH_TOKEN)) {
+      const refreshed = await refreshMlTokenIfPossible();
+      if (refreshed) {
+        headers.Authorization = `Bearer ${refreshed}`;
+        mlRes = await fetch(
+          `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(query)}&limit=6`,
+          {
+            headers,
+            signal: AbortSignal.timeout(4500),
+          }
+        );
+      }
+    }
 
     if (mlRes.ok) {
       const data = await mlRes.json();
@@ -1643,6 +1716,7 @@ async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1665,7 +1739,11 @@ async function startServer() {
   });
 }
 
-startServer().catch(err => {
-  console.error('Falha ao iniciar servidor:', err);
-  process.exit(1);
-});
+export default app;
+
+if (!process.env.VERCEL) {
+  startServer().catch(err => {
+    console.error('Falha ao iniciar servidor:', err);
+    process.exit(1);
+  });
+}

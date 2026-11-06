@@ -310,7 +310,9 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
           if (matchedWords.length >= minRequired) {
             const allWordsMatch = matchedWords.length === queryWords.length;
             const exactSubstring = normDesc.includes(normQuery);
+            const hasCsvMlb = Boolean((item.mlbId || item.mlb || '').trim());
             const score =
+              (hasCsvMlb ? 250 : 0) +
               (exactSubstring ? 100 : 0) +
               (allWordsMatch ? 50 : 0) +
               Math.round((matchedWords.length / Math.max(queryWords.length, 1)) * 40);
@@ -326,7 +328,31 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
 
       matchedItems.sort((a, b) => b.score - a.score);
 
-      const mlbData = mlbResultsMap[normQuery] || buildInstantMlbResult(rawQuery);
+      const baseMlbData = mlbResultsMap[normQuery] || buildInstantMlbResult(rawQuery);
+      // Prioritize MLBs that come from the CSV (Coluna G)
+      const csvMlbAds = matchedItems
+        .filter((m) => Boolean((m.item.mlbId || m.item.mlb || '').trim()))
+        .map((m) => {
+          const mlbCode = (m.item.mlbId || m.item.mlb || '').trim();
+          return {
+            mlbId: mlbCode,
+            title: `[CSV · ID ${m.item.id}] ${m.item.itens}`,
+            price: m.item.valorReal ? `R$ ${m.item.valorReal}` : 'No CSV',
+            url: formatMercadoLivreUrl(m.item.itens, mlbCode),
+            searchUrl: formatMercadoLivreUrl(m.item.itens, mlbCode),
+            condition: 'Novo',
+          };
+        });
+
+      const mlbData: MlbNameSearchItemResult =
+        csvMlbAds.length > 0
+          ? {
+              query: baseMlbData.query,
+              primaryMlbId: csvMlbAds[0].mlbId,
+              searchUrl: csvMlbAds[0].url,
+              ads: csvMlbAds,
+            }
+          : baseMlbData;
 
       return {
         queryIdx,

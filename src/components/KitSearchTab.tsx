@@ -152,11 +152,12 @@ export const KitSearchTab: React.FC<KitSearchTabProps> = ({ csvItems }) => {
         Number(csvItem.qtdItens || '1') > 1;
 
       const allTypedItemsMatched = matchedItemsCount === itemKeywordGroups.length;
+      const hasCsvMlb = Boolean((csvItem.mlbId || csvItem.mlb || '').trim());
       const itemCoverageScore =
         (matchedItemsCount / Math.max(itemKeywordGroups.length, 1)) * 60;
       const kwCoverageScore =
         (matchedKeywordsSet.size / Math.max(allKeywords.length, 1)) * 30;
-      const bonus = (allTypedItemsMatched ? 25 : 0) + (isKitRow ? 10 : 0);
+      const bonus = (allTypedItemsMatched ? 25 : 0) + (isKitRow ? 10 : 0) + (hasCsvMlb ? 50 : 0);
 
       scored.push({
         item: csvItem,
@@ -164,13 +165,18 @@ export const KitSearchTab: React.FC<KitSearchTabProps> = ({ csvItems }) => {
         totalItemsSearched: itemKeywordGroups.length,
         matchedKeywords: Array.from(matchedKeywordsSet),
         isKitRow,
-        score: Math.min(100, Math.round(itemCoverageScore + kwCoverageScore + bonus)),
+        score: Math.round(itemCoverageScore + kwCoverageScore + bonus),
       });
     }
 
     scored.sort((a, b) => {
       if (b.matchedItemsCount !== a.matchedItemsCount) {
         return b.matchedItemsCount - a.matchedItemsCount;
+      }
+      const aHasMlb = Boolean((a.item.mlbId || a.item.mlb || '').trim());
+      const bHasMlb = Boolean((b.item.mlbId || b.item.mlb || '').trim());
+      if (aHasMlb !== bHasMlb) {
+        return aHasMlb ? -1 : 1;
       }
       if (b.score !== a.score) {
         return b.score - a.score;

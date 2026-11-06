@@ -41,6 +41,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [matchPage, setMatchPage] = useState(1);
+  const [showExternalMlAds, setShowExternalMlAds] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -67,6 +68,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
     setErrorMessage(null);
     setScanResult(null);
     setMatchPage(1);
+    setShowExternalMlAds(false);
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -138,6 +140,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
     setScanResult(null);
     setErrorMessage(null);
     setMatchPage(1);
+    setShowExternalMlAds(false);
   };
 
   // Extract keywords from the translated image text + product name + kit suggestion
@@ -161,7 +164,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
     return unique.slice(0, 18);
   }, [scanResult]);
 
-  // Search keywords across Firebase / CSV list with special focus on KITS and Column G (MLB)
+  // Search keywords across Firebase / CSV list — ABSOLUTE PRIORITY to items in the CSV, especially with Column G (MLB)
   const firebaseMatches = useMemo(() => {
     if (!scanResult || extractedKeywords.length === 0 || csvItems.length === 0) {
       return [];
@@ -171,6 +174,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
       item: CsvItem;
       mlbCodes: string[];
       primaryMlb: string;
+      hasCsvMlb: boolean;
       matchedKeywords: string[];
       isKitItem: boolean;
       score: number;
@@ -195,17 +199,21 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
 
         const mlbCodes = extractMlbCodes(item.mlb || item.mlbId || '');
         const primaryMlb = mlbCodes[0] || normalizeMlbCode(item.mlb || item.mlbId || '');
+        const hasCsvMlb = Boolean(primaryMlb);
 
-        // Score prioritizes keyword overlap + bonus for kit/multi-component match + bonus if Column G MLB exists
         const overlapRatio = matchedKeywords.length / Math.max(Math.min(extractedKeywords.length, 6), 1);
-        const kitBonus = isKitItem && matchedKeywords.length >= 2 ? 25 : 0;
-        const mlbBonus = primaryMlb ? 10 : 0;
-        const score = Math.round(matchedKeywords.length * 30 + overlapRatio * 40 + kitBonus + mlbBonus);
+        const kitBonus = isKitItem && matchedKeywords.length >= 2 ? 15 : 0;
+        // High priority bonus when the CSV item has a Column G MLB code and matches keywords
+        const csvMlbPriorityBonus = hasCsvMlb && matchedKeywords.length >= 2 ? 250 : hasCsvMlb ? 80 : 0;
+        const score = Math.round(
+          matchedKeywords.length * 30 + overlapRatio * 40 + kitBonus + csvMlbPriorityBonus
+        );
 
         scored.push({
           item,
           mlbCodes,
           primaryMlb,
+          hasCsvMlb,
           matchedKeywords,
           isKitItem,
           score,
@@ -213,7 +221,14 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
       }
     }
 
-    scored.sort((a, b) => b.score - a.score);
+    scored.sort((a, b) => {
+      // If both are strong matches (2+ keywords), always prioritize the one that has MLB in the CSV (Column G)
+      if (a.matchedKeywords.length >= 2 && b.matchedKeywords.length >= 2 && a.hasCsvMlb !== b.hasCsvMlb) {
+        return a.hasCsvMlb ? -1 : 1;
+      }
+      return b.score - a.score;
+    });
+
     return scored;
   }, [scanResult, extractedKeywords, csvItems]);
 
@@ -227,85 +242,108 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
     safePage * PAGE_SIZE
   );
 
-  // Combine all MLBs from Column G of matched CSV items + all MLBs from Mercado Livre for this product
-  const allProductMlbAds = useMemo(() => {
-    if (!scanResult) return [];
+  // Separate CSV MLBs (Priority #1) from external Mercado Livre suggestions
+  const { csvMlbAds, externalMlbAds } = useMemo(() => {
+    if (!scanResult) return { csvMlbAds: [], externalMlbAds: [] };
 
-    const combined: Array<{
+    const csvAds: Array<{
       mlbId: string;
       title: string;
       price: string;
       url: string;
-      source: 'coluna_g' | 'mercadolivre';
+      source: 'coluna_g';
+      destiId: string;
+    }> = [];
+    const extAds: Array<{
+      mlbId: string;
+      title: string;
+      price: string;
+      url: string;
+      source: 'mercadolivre';
       destiId?: string;
-      isPerfect?: boolean;
     }> = [];
     const seenMlb = new Set<string>();
 
-    // 1. Add all MLBs from Column G of matching Destinação CSV records first
-    for (let idx = 0; idx < firebaseMatches.length; idx++) {
-      const m = firebaseMatches[idx];
+    // 1. PRIORITY: All MLBs from Column G of matching CSV records
+    for (const m of firebaseMatches) {
       const codes = m.mlbCodes.length > 0 ? m.mlbCodes : m.primaryMlb ? [m.primaryMlb] : [];
       for (const code of codes) {
         if (!code || seenMlb.has(code)) continue;
         seenMlb.add(code);
-        combined.push({
+        csvAds.push({
           mlbId: code,
           title: m.item.itens,
-          price: m.item.valorReal ? `R$ ${m.item.valorReal}` : 'Na base Destinação',
+          price: m.item.valorReal ? `R$ ${m.item.valorReal}` : 'No CSV',
           url: formatMercadoLivreUrl(m.item.itens, code),
           source: 'coluna_g',
           destiId: m.item.id,
-          isPerfect: idx === 0,
         });
       }
     }
 
-    // 2. Add all MLBs found on Mercado Livre for the product in the image
+    // 2. Secondary fallback: External Mercado Livre ads
     if (Array.isArray(scanResult.mlbList)) {
       for (const ad of scanResult.mlbList) {
         const code = normalizeMlbCode(ad.mlbId);
         if (!code || seenMlb.has(code)) continue;
         seenMlb.add(code);
-        combined.push({
+        extAds.push({
           mlbId: code,
           title: ad.title || scanResult.productName,
           price: ad.price || scanResult.priceRange || 'Ver no ML',
           url: ad.url || formatMercadoLivreUrl(ad.title || scanResult.productName, code),
           source: 'mercadolivre',
-          isPerfect: combined.length === 0,
         });
       }
     }
 
-    return combined;
+    return { csvMlbAds: csvAds, externalMlbAds: extAds };
   }, [scanResult, firebaseMatches]);
 
-  // The single "Anúncio Perfeito" (uses Column G MLB of best CSV match if available, otherwise top Mercado Livre ad)
+  // Displayed MLB list prioritizes what is in the CSV!
+  // If CSV has MLBs, only show CSV MLBs by default (unless user clicks to expand external ML ads)
+  const displayedMlbAds = useMemo(() => {
+    if (csvMlbAds.length > 0) {
+      return showExternalMlAds ? [...csvMlbAds, ...externalMlbAds] : csvMlbAds;
+    }
+    return externalMlbAds;
+  }, [csvMlbAds, externalMlbAds, showExternalMlAds]);
+
+  // The single "Anúncio Perfeito" — strictly prioritizes the CSV match with Column G MLB!
   const perfectAd = useMemo(() => {
     if (!scanResult) return null;
-    if (bestMatch) {
+
+    const priorityCsvMatch =
+      firebaseMatches.find((m) => m.hasCsvMlb && m.matchedKeywords.length >= 2) ||
+      firebaseMatches.find((m) => m.hasCsvMlb) ||
+      bestMatch;
+
+    if (priorityCsvMatch) {
       const chosenMlb =
-        bestMatch.primaryMlb ||
+        priorityCsvMatch.primaryMlb ||
+        csvMlbAds[0]?.mlbId ||
         normalizeMlbCode(scanResult.mlbId) ||
-        allProductMlbAds[0]?.mlbId ||
-        'MLB3849182374';
+        externalMlbAds[0]?.mlbId ||
+        '';
       return {
         mlbId: chosenMlb,
-        allColumnGMlbs: bestMatch.mlbCodes,
-        title: bestMatch.item.itens,
-        price: bestMatch.item.valorReal ? `R$ ${bestMatch.item.valorReal}` : scanResult.priceRange || '',
-        destiId: bestMatch.item.id,
-        isKit: bestMatch.isKitItem,
-        matchedKeywords: bestMatch.matchedKeywords,
-        fromColumnG: Boolean(bestMatch.primaryMlb),
-        url: formatMercadoLivreUrl(bestMatch.item.itens, chosenMlb),
+        allColumnGMlbs: priorityCsvMatch.mlbCodes,
+        title: priorityCsvMatch.item.itens,
+        price: priorityCsvMatch.item.valorReal
+          ? `R$ ${priorityCsvMatch.item.valorReal}`
+          : scanResult.priceRange || '',
+        destiId: priorityCsvMatch.item.id,
+        isKit: priorityCsvMatch.isKitItem,
+        matchedKeywords: priorityCsvMatch.matchedKeywords,
+        fromColumnG: Boolean(priorityCsvMatch.primaryMlb),
+        url: formatMercadoLivreUrl(priorityCsvMatch.item.itens, chosenMlb),
       };
     }
 
-    const topAd = allProductMlbAds[0];
-    const fallbackMlb = topAd?.mlbId || normalizeMlbCode(scanResult.mlbId) || 'MLB3849182374';
-    const fallbackTitle = scanResult.kitSuggestion || scanResult.productName || topAd?.title || 'Produto Mercado Livre';
+    const topAd = externalMlbAds[0];
+    const fallbackMlb = topAd?.mlbId || normalizeMlbCode(scanResult.mlbId) || '';
+    const fallbackTitle =
+      scanResult.kitSuggestion || scanResult.productName || topAd?.title || 'Produto Mercado Livre';
     return {
       mlbId: fallbackMlb,
       allColumnGMlbs: [],
@@ -317,7 +355,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
       fromColumnG: false,
       url: formatMercadoLivreUrl(fallbackTitle, fallbackMlb),
     };
-  }, [scanResult, bestMatch, allProductMlbAds, extractedKeywords]);
+  }, [scanResult, firebaseMatches, bestMatch, csvMlbAds, externalMlbAds, extractedKeywords]);
 
   const highlightText = (text: string, wordsToHighlight: string[]) => {
     if (!wordsToHighlight || wordsToHighlight.length === 0) return text;
@@ -378,7 +416,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                 Cole a foto (<kbd className="font-mono">Ctrl + V</kbd>) ou clique para enviar
               </span>
               <span className="text-[11px] text-neutral-400 block">
-                Usa a imagem como base para buscar todos os MLBs (Coluna G da Destinação + Mercado Livre) e trazer o anúncio perfeito
+                Prioriza o ID e o MLB da Coluna G do seu CSV ({csvItems.length} registros)
               </span>
             </div>
           ) : (
@@ -437,59 +475,21 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
         {/* RESULTS */}
         {scanResult && !isScanning && (
           <div className="mt-6 pt-6 border-t border-neutral-200 dark:border-neutral-800 space-y-5">
-            {/* 1. TRANSLATED IMAGE TEXT & EXTRACTED KEYWORDS */}
-            <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 space-y-3">
-              <div className="space-y-1">
-                <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider block">
-                  Tradução da Imagem em Texto
-                </span>
-                <p className="text-xs font-medium text-neutral-900 dark:text-white leading-relaxed">
-                  {scanResult.translatedText || scanResult.productName}
-                </p>
-                {scanResult.kitSuggestion && scanResult.kitSuggestion !== scanResult.productName && (
-                  <p className="text-xs text-neutral-600 dark:text-neutral-400">
-                    Sugestão de Kit: <strong className="text-neutral-900 dark:text-neutral-200">{scanResult.kitSuggestion}</strong>
-                  </p>
-                )}
-              </div>
-
-              {extractedKeywords.length > 0 && (
-                <div className="pt-2 border-t border-neutral-200/70 dark:border-neutral-800">
-                  <span className="text-[10px] font-medium text-neutral-400 uppercase tracking-wider block mb-1.5">
-                    Palavras-Chave Buscadas na Base ({extractedKeywords.length})
-                  </span>
-                  <div className="flex flex-wrap gap-1">
-                    {extractedKeywords.map((kw, idx) => {
-                      const isInBestMatch = bestMatch?.matchedKeywords.includes(kw);
-                      return (
-                        <span
-                          key={idx}
-                          className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
-                            isInBestMatch
-                              ? 'bg-neutral-900 text-white border-neutral-900 dark:bg-white dark:text-neutral-950 dark:border-white font-semibold'
-                              : 'bg-white dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-neutral-200 dark:border-neutral-800'
-                          }`}
-                        >
-                          {kw}
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* 2. O ANÚNCIO PERFEITO (BASEADO NA IMAGEM + COLUNA G MLB DA DESTINAÇÃO) */}
+            {/* 1. O ANÚNCIO PERFEITO (PRIORIDADE TOTAL PARA O QUE ESTÁ NO CSV / COLUNA G) */}
             {perfectAd && (
-              <div className="border border-neutral-900 dark:border-neutral-200 rounded-lg overflow-hidden bg-white dark:bg-neutral-900">
+              <div className="border-2 border-neutral-900 dark:border-neutral-100 rounded-lg overflow-hidden bg-white dark:bg-neutral-900">
                 <div className="px-4 py-2.5 bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs font-semibold uppercase tracking-wider">
-                      Anúncio Perfeito Encontrado
+                      {perfectAd.fromColumnG
+                        ? 'Anúncio Perfeito · Coluna G do CSV'
+                        : perfectAd.destiId
+                        ? 'Match Encontrado no CSV'
+                        : 'Anúncio Sugerido'}
                     </span>
                     {perfectAd.fromColumnG && (
-                      <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-white/15 dark:bg-neutral-900/15">
-                        Coluna G (MLB) · Destinação
+                      <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-white text-neutral-900 dark:bg-neutral-900 dark:text-white font-bold">
+                        Prioridade CSV
                       </span>
                     )}
                     {perfectAd.isKit && (
@@ -509,12 +509,14 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                 <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div className="space-y-1.5 min-w-0 flex-1">
                     <div className="flex items-center gap-2.5 flex-wrap">
-                      <span className="text-lg font-mono font-bold text-neutral-900 dark:text-white tabular-nums">
-                        {perfectAd.mlbId}
-                      </span>
+                      {perfectAd.mlbId && (
+                        <span className="text-lg font-mono font-bold text-neutral-900 dark:text-white tabular-nums">
+                          {perfectAd.mlbId}
+                        </span>
+                      )}
 
                       {perfectAd.destiId && (
-                        <span className="text-sm font-mono font-semibold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 tabular-nums">
+                        <span className="text-sm font-mono font-semibold px-2.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 tabular-nums">
                           ID: {perfectAd.destiId}
                         </span>
                       )}
@@ -532,18 +534,20 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => copyText(perfectAd.mlbId, 'perfect-mlb')}
-                      className="px-3.5 py-2 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {copiedKey === 'perfect-mlb' ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                      <span>{copiedKey === 'perfect-mlb' ? 'MLB Copiado' : 'Copiar MLB'}</span>
-                    </button>
+                    {perfectAd.mlbId && (
+                      <button
+                        type="button"
+                        onClick={() => copyText(perfectAd.mlbId, 'perfect-mlb')}
+                        className="px-3.5 py-2 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {copiedKey === 'perfect-mlb' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedKey === 'perfect-mlb' ? 'MLB Copiado' : 'Copiar MLB'}</span>
+                      </button>
+                    )}
 
                     {perfectAd.destiId && (
                       <button
@@ -566,7 +570,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                       rel="noopener noreferrer"
                       className="px-3 py-2 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 flex items-center gap-1.5"
                     >
-                      <span>Abrir Anúncio Perfeito</span>
+                      <span>Abrir</span>
                       <ExternalLink className="w-3.5 h-3.5" />
                     </a>
                   </div>
@@ -613,14 +617,14 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                         >
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-mono font-semibold text-neutral-900 dark:text-neutral-200 tabular-nums">
-                                ID: {item.id}
-                              </span>
                               {primaryMlb && (
-                                <span className="text-xs font-mono text-neutral-600 dark:text-neutral-300 tabular-nums">
-                                  · Col. G: {primaryMlb}
+                                <span className="text-xs font-mono font-bold text-neutral-900 dark:text-white tabular-nums">
+                                  {primaryMlb}
                                 </span>
                               )}
+                              <span className="text-xs font-mono font-semibold text-neutral-700 dark:text-neutral-300 tabular-nums">
+                                ID: {item.id}
+                              </span>
                               {isKitItem && (
                                 <span className="text-[10px] font-mono px-1.5 py-0.2 rounded border border-neutral-300 dark:border-neutral-700 text-neutral-500">
                                   Kit
@@ -673,42 +677,61 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
               </div>
             )}
 
-            {/* 3. TODOS OS MLBS ENCONTRADOS PARA O PRODUTO (COLUNA G + MERCADO LIVRE) */}
-            {allProductMlbAds.length > 0 && (
+            {/* 2. MLBS DO PRODUTO (PRIORIDADE PARA OS MLBS DA COLUNA G DO CSV) */}
+            {displayedMlbAds.length > 0 && (
               <div className="border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden bg-white dark:bg-neutral-900">
                 <div className="px-4 py-3 bg-neutral-50 dark:bg-neutral-950 border-b border-neutral-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <span className="text-xs font-semibold text-neutral-900 dark:text-white uppercase tracking-wider block">
-                      Todos os MLBs do Produto ({allProductMlbAds.length})
+                      {csvMlbAds.length > 0
+                        ? `MLBs no CSV · Coluna G (${csvMlbAds.length})`
+                        : `MLBs do Produto (${displayedMlbAds.length})`}
                     </span>
                     <span className="text-[11px] text-neutral-500">
-                      Códigos MLB da Coluna G (Destinação) e anúncios correspondentes no Mercado Livre
+                      {csvMlbAds.length > 0
+                        ? 'Exibindo prioritariamente os códigos MLB cadastrados na Coluna G do seu CSV'
+                        : 'Códigos MLB encontrados no Mercado Livre para este produto'}
                     </span>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const allCodes = allProductMlbAds.map((a) => a.mlbId).join('\n');
-                      copyText(allCodes, 'copy-all-mlbs');
-                    }}
-                    className="px-2.5 py-1.5 text-xs font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    {copiedKey === 'copy-all-mlbs' ? (
-                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-3.5 h-3.5" />
+                  <div className="flex items-center gap-2">
+                    {csvMlbAds.length > 0 && externalMlbAds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowExternalMlAds((v) => !v)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-500 hover:text-neutral-900 dark:hover:text-white cursor-pointer"
+                      >
+                        {showExternalMlAds
+                          ? 'Ocultar sugestões externas'
+                          : `Ver +${externalMlbAds.length} sugestões ML`}
+                      </button>
                     )}
-                    <span>Copiar Todos os MLBs</span>
-                  </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetList = csvMlbAds.length > 0 && !showExternalMlAds ? csvMlbAds : displayedMlbAds;
+                        const allCodes = targetList.map((a) => a.mlbId).join('\n');
+                        copyText(allCodes, 'copy-all-mlbs');
+                      }}
+                      className="px-2.5 py-1.5 text-xs font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {copiedKey === 'copy-all-mlbs' ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                      <span>Copiar MLBs</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="divide-y divide-neutral-200 dark:divide-neutral-800">
-                  {allProductMlbAds.map((item, idx) => (
+                  {displayedMlbAds.map((item, idx) => (
                     <div
                       key={`${item.mlbId}-${idx}`}
                       className={`p-3.5 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                        item.source === 'coluna_g' ? 'bg-neutral-50/50 dark:bg-neutral-950/40' : ''
+                        item.source === 'coluna_g' ? 'bg-neutral-50/70 dark:bg-neutral-950/50' : ''
                       }`}
                     >
                       <div className="space-y-0.5 min-w-0 flex-1">
@@ -722,7 +745,7 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                             </span>
                           )}
                           {item.destiId && (
-                            <span className="text-[11px] font-mono text-neutral-500 tabular-nums">
+                            <span className="text-[11px] font-mono font-semibold text-neutral-700 dark:text-neutral-300 tabular-nums">
                               ID: {item.destiId}
                             </span>
                           )}
@@ -736,6 +759,17 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
+                        {item.destiId && (
+                          <button
+                            type="button"
+                            onClick={() => copyText(item.destiId!, `row-id-${idx}`)}
+                            className="px-2.5 py-1 text-xs font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+                          >
+                            {copiedKey === `row-id-${idx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                            <span>ID</span>
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           onClick={() => copyText(item.mlbId, `mlb-${idx}`)}
@@ -760,6 +794,43 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
                 </div>
               </div>
             )}
+
+            {/* 3. TRANSLATED IMAGE TEXT & EXTRACTED KEYWORDS */}
+            <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 space-y-3">
+              <div className="space-y-1">
+                <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider block">
+                  Tradução da Imagem em Texto
+                </span>
+                <p className="text-xs font-medium text-neutral-900 dark:text-white leading-relaxed">
+                  {scanResult.translatedText || scanResult.productName}
+                </p>
+              </div>
+
+              {extractedKeywords.length > 0 && (
+                <div className="pt-2 border-t border-neutral-200/70 dark:border-neutral-800">
+                  <span className="text-[10px] font-medium text-neutral-400 uppercase tracking-wider block mb-1.5">
+                    Palavras-Chave Buscadas no CSV ({extractedKeywords.length})
+                  </span>
+                  <div className="flex flex-wrap gap-1">
+                    {extractedKeywords.map((kw, idx) => {
+                      const isInBestMatch = perfectAd?.matchedKeywords.includes(kw);
+                      return (
+                        <span
+                          key={idx}
+                          className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+                            isInBestMatch
+                              ? 'bg-neutral-900 text-white border-neutral-900 dark:bg-white dark:text-neutral-950 dark:border-white font-semibold'
+                              : 'bg-white dark:bg-neutral-900 text-neutral-600 dark:text-neutral-400 border-neutral-200 dark:border-neutral-800'
+                          }`}
+                        >
+                          {kw}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
