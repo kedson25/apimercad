@@ -1,10 +1,8 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  Camera,
   Copy,
   Check,
   Search,
-  AlertCircle,
   Trash2,
   Plus,
   ExternalLink,
@@ -14,8 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
-import { CsvItem, CsvMatchResult } from '../types/csvMatcher';
-import { matchPhotoWithCsv, searchMlbByNames, MlbNameSearchItemResult } from '../services/mlApi';
+import { CsvItem } from '../types/csvMatcher';
+import { searchMlbByNames, MlbNameSearchItemResult } from '../services/mlApi';
 import { formatMercadoLivreUrl } from '../utils/mlUrl';
 
 interface CsvMatcherTabProps {
@@ -65,99 +63,7 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
   const [mlbResultsMap, setMlbResultsMap] = useState<Record<string, MlbNameSearchItemResult>>({});
   const [isSearchingMlb, setIsSearchingMlb] = useState(false);
 
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [isMatching, setIsMatching] = useState(false);
-  const [matchResult, setMatchResult] = useState<CsvMatchResult | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  const photoInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
-      const clipItems = e.clipboardData?.items;
-      if (!clipItems) return;
-      for (let i = 0; i < clipItems.length; i++) {
-        if (clipItems[i].type.startsWith('image/')) {
-          const file = clipItems[i].getAsFile();
-          if (file) {
-            handlePhotoFile(file);
-            break;
-          }
-        }
-      }
-    };
-    window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
-  }, [items]);
-
-  const handlePhotoFile = (file: File) => {
-    setErrorMessage(null);
-    setMatchResult(null);
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const originalDataUrl = e.target?.result as string;
-      const img = new Image();
-      img.onload = () => {
-        const maxDim = 1600;
-        let width = img.width;
-        let height = img.height;
-
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
-          setImagePreview(compressedDataUrl);
-          const base64 = compressedDataUrl.split(',')[1];
-          runCsvPhotoMatch(base64, 'image/jpeg');
-        } else {
-          setImagePreview(originalDataUrl);
-          const base64 = originalDataUrl.split(',')[1];
-          runCsvPhotoMatch(base64, file.type || 'image/jpeg');
-        }
-      };
-      img.onerror = () => {
-        setImagePreview(originalDataUrl);
-        const base64 = originalDataUrl.split(',')[1];
-        runCsvPhotoMatch(base64, file.type || 'image/jpeg');
-      };
-      img.src = originalDataUrl;
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const runCsvPhotoMatch = async (base64: string, mimeType: string) => {
-    if (items.length === 0) {
-      setErrorMessage('Carregue o arquivo CSV na aba "Carregar CSV" antes de comparar.');
-      return;
-    }
-
-    setIsMatching(true);
-    setErrorMessage(null);
-
-    try {
-      const res = await matchPhotoWithCsv(base64, items, mimeType);
-      setMatchResult(res);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Falha ao cruzar foto com o CSV');
-    } finally {
-      setIsMatching(false);
-    }
-  };
 
   const copyToClipboard = (text: string, key?: string) => {
     navigator.clipboard.writeText(text);
@@ -773,138 +679,6 @@ export const CsvMatcherTab: React.FC<CsvMatcherTabProps> = ({
                 );
               })}
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* 2. COMPACT PHOTO VS CSV MATCHER */}
-      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-neutral-900 dark:text-neutral-100 uppercase tracking-wider">
-            Comparar Foto com o CSV
-          </span>
-          <span className="text-[11px] font-mono text-neutral-400">Ctrl + V</span>
-        </div>
-
-        <div
-          onClick={() => !imagePreview && photoInputRef.current?.click()}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (e.dataTransfer.files?.[0]) handlePhotoFile(e.dataTransfer.files[0]);
-          }}
-          className={`border border-dashed rounded-lg p-6 text-center transition-colors ${
-            imagePreview
-              ? 'border-neutral-200 dark:border-neutral-800'
-              : 'border-neutral-300 dark:border-neutral-700 hover:border-neutral-900 dark:hover:border-neutral-400 cursor-pointer'
-          }`}
-        >
-          <input
-            ref={photoInputRef}
-            type="file"
-            accept="image/*"
-            onChange={(e) => e.target.files?.[0] && handlePhotoFile(e.target.files[0])}
-            className="hidden"
-          />
-
-          {!imagePreview ? (
-            <div className="space-y-1.5 py-2">
-              <Camera className="w-5 h-5 text-neutral-400 mx-auto" />
-              <span className="text-xs font-medium text-neutral-800 dark:text-neutral-200 block">
-                Cole ou envie a foto para buscar o ID correspondente no CSV
-              </span>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center gap-4">
-              <div className="relative">
-                <img
-                  src={imagePreview}
-                  alt="Foto"
-                  className="max-h-28 rounded border border-neutral-200 dark:border-neutral-800"
-                />
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setImagePreview(null);
-                    setMatchResult(null);
-                  }}
-                  className="absolute -top-2 -right-2 p-1 bg-neutral-900 text-white rounded-full cursor-pointer"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => photoInputRef.current?.click()}
-                className="text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white underline cursor-pointer"
-              >
-                Trocar foto
-              </button>
-            </div>
-          )}
-        </div>
-
-        {isMatching && (
-          <div className="p-3.5 rounded-md bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 text-xs flex items-center justify-center gap-2 text-neutral-600 dark:text-neutral-300">
-            <div className="w-4 h-4 border-2 border-neutral-900 dark:border-white border-t-transparent rounded-full animate-spin shrink-0" />
-            <span>O sistema está buscando...</span>
-          </div>
-        )}
-
-        {errorMessage && (
-          <div className="p-3 rounded-md bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMessage}</span>
-          </div>
-        )}
-
-        {/* ONLY DISPLAY ID IF A REAL MATCH FROM CSV WAS FOUND */}
-        {matchResult && !isMatching && matchResult.matchedId && (
-          <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="text-lg font-mono font-bold text-neutral-900 dark:text-white tabular-nums">
-                  ID: {matchResult.matchedId}
-                </span>
-                {matchResult.mlbId && (
-                  <span className="text-xs font-mono text-neutral-500 tabular-nums">
-                    · Coluna G (CSV): {matchResult.mlbId}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-neutral-700 dark:text-neutral-300">
-                {matchResult.matchedItem}
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => copyToClipboard(matchResult.matchedId)}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-1.5 cursor-pointer"
-              >
-                {copiedId === matchResult.matchedId ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedId === matchResult.matchedId ? 'Copiado' : 'Copiar ID'}</span>
-              </button>
-
-              <a
-                href={formatMercadoLivreUrl(matchResult.matchedItem || matchResult.mercadoLivreTitle, matchResult.mlbId)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3 py-1.5 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 flex items-center gap-1.5"
-              >
-                <span>Abrir no ML</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            </div>
-          </div>
-        )}
-
-        {matchResult && !isMatching && !matchResult.matchedId && (
-          <div className="p-4 rounded-lg bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-neutral-400 shrink-0" />
-            <span>Nenhum item correspondente encontrado na base de dados do CSV para esta foto. Nenhum ID fictício foi atribuído.</span>
           </div>
         )}
       </div>
