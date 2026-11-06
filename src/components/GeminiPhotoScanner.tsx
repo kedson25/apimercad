@@ -8,6 +8,9 @@ import {
   Trash2,
   ChevronLeft,
   ChevronRight,
+  Upload,
+  X,
+  RefreshCw,
 } from 'lucide-react';
 import { GeminiPhotoScanResult } from '../types/mercadolivre';
 import { CsvItem } from '../types/csvMatcher';
@@ -43,6 +46,105 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
   const [matchPage, setMatchPage] = useState(1);
   const [showExternalMlAds, setShowExternalMlAds] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Camera device state & references
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'environment' | 'user'>('environment');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const cameraFallbackInputRef = useRef<HTMLInputElement>(null);
+
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const startCameraStream = async (facing: 'environment' | 'user') => {
+    stopCameraStream();
+    setCameraError(null);
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Câmera não suportada diretamente neste navegador.');
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play().catch(() => {});
+      }
+    } catch (err: any) {
+      console.warn('Camera stream error:', err);
+      setCameraError(
+        'Não foi possível inicializar a câmera do navegador. Você pode usar a câmera nativa do seu aparelho pelo botão abaixo.'
+      );
+    }
+  };
+
+  const openCameraModal = () => {
+    setCameraError(null);
+    setIsCameraOpen(true);
+  };
+
+  const toggleCameraFacingMode = () => {
+    setCameraFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
+  };
+
+  useEffect(() => {
+    if (isCameraOpen) {
+      startCameraStream(cameraFacingMode);
+    } else {
+      stopCameraStream();
+    }
+    return () => {
+      stopCameraStream();
+    };
+  }, [isCameraOpen, cameraFacingMode]);
+
+  const capturePhotoFromCamera = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+
+    setIsCapturing(true);
+    try {
+      const canvas = document.createElement('canvas');
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.90);
+
+      stopCameraStream();
+      setIsCameraOpen(false);
+      setIsCapturing(false);
+
+      setImagePreview(dataUrl);
+      const base64 = dataUrl.split(',')[1];
+      triggerScan(base64, 'image/jpeg');
+    } catch (err: any) {
+      setIsCapturing(false);
+      setCameraError('Erro ao capturar imagem: ' + (err.message || 'Tente novamente'));
+    }
+  };
 
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
@@ -386,7 +488,128 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
 
   return (
     <div className="space-y-6">
-      {/* UPLOAD BOX */}
+      {/* DEVICE CAMERA VIEWFINDER MODAL */}
+      {isCameraOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-neutral-900 text-white border border-neutral-800 rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="p-4 border-b border-neutral-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-xs font-semibold tracking-wide uppercase">Câmera do Dispositivo</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={toggleCameraFacingMode}
+                  className="px-2.5 py-1 text-neutral-300 hover:text-white rounded-md bg-neutral-800 hover:bg-neutral-700 cursor-pointer text-xs flex items-center gap-1.5"
+                  title="Trocar entre câmera traseira e frontal"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span className="text-[11px]">Alternar Câmera</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    stopCameraStream();
+                    setIsCameraOpen(false);
+                  }}
+                  className="p-1.5 text-neutral-400 hover:text-white rounded-md bg-neutral-800 hover:bg-neutral-700 cursor-pointer"
+                  title="Fechar"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Video Viewfinder */}
+            <div className="relative bg-black aspect-4/3 flex items-center justify-center overflow-hidden">
+              {cameraError ? (
+                <div className="p-6 text-center space-y-3">
+                  <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                  <p className="text-xs text-neutral-300 max-w-xs mx-auto leading-relaxed">{cameraError}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cameraFallbackInputRef.current?.click();
+                      setIsCameraOpen(false);
+                    }}
+                    className="px-4 py-2 text-xs font-semibold rounded-md bg-white text-neutral-950 hover:opacity-90 cursor-pointer inline-flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>Abrir Câmera Nativa do Celular</span>
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  {/* Viewfinder Target Guidelines */}
+                  <div className="absolute inset-8 pointer-events-none border border-white/20 rounded-xl flex flex-col justify-between p-2">
+                    <div className="flex justify-between">
+                      <div className="w-5 h-5 border-t-2 border-l-2 border-emerald-400 rounded-tl" />
+                      <div className="w-5 h-5 border-t-2 border-r-2 border-emerald-400 rounded-tr" />
+                    </div>
+                    <div className="flex justify-between">
+                      <div className="w-5 h-5 border-b-2 border-l-2 border-emerald-400 rounded-bl" />
+                      <div className="w-5 h-5 border-b-2 border-r-2 border-emerald-400 rounded-br" />
+                    </div>
+                  </div>
+                  <div className="absolute bottom-3 text-center w-full pointer-events-none">
+                    <span className="text-[11px] bg-black/60 backdrop-blur-xs px-3 py-1 rounded-full text-neutral-200 shadow-sm">
+                      Enquadre o produto ou embalagem e clique no botão
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Shutter Controls */}
+            <div className="p-4 bg-neutral-950 flex items-center justify-between sm:justify-around">
+              <button
+                type="button"
+                onClick={() => {
+                  cameraFallbackInputRef.current?.click();
+                  setIsCameraOpen(false);
+                }}
+                className="text-xs text-neutral-400 hover:text-white underline cursor-pointer"
+              >
+                Câmera nativa
+              </button>
+
+              <button
+                type="button"
+                disabled={Boolean(cameraError) || isCapturing}
+                onClick={capturePhotoFromCamera}
+                className="w-16 h-16 rounded-full bg-white hover:bg-neutral-200 active:scale-95 transition-all flex items-center justify-center border-4 border-neutral-800 shadow-xl cursor-pointer disabled:opacity-40"
+                title="Tirar foto"
+              >
+                <div className="w-12 h-12 rounded-full border-2 border-neutral-950 flex items-center justify-center">
+                  <div className="w-8 h-8 rounded-full bg-neutral-950" />
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  stopCameraStream();
+                  setIsCameraOpen(false);
+                }}
+                className="text-xs text-neutral-400 hover:text-white cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* UPLOAD & CAMERA BOX */}
       <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-6">
         <div
           onDrop={(e) => {
@@ -394,13 +617,14 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
             if (e.dataTransfer.files?.[0]) handleImageFile(e.dataTransfer.files[0]);
           }}
           onDragOver={(e) => e.preventDefault()}
-          onClick={() => !imagePreview && fileInputRef.current?.click()}
+          onClick={() => !imagePreview && openCameraModal()}
           className={`border border-dashed rounded-lg p-8 text-center transition-colors ${
             imagePreview
               ? 'border-neutral-200 dark:border-neutral-800'
               : 'border-neutral-300 dark:border-neutral-700 hover:border-neutral-900 dark:hover:border-neutral-400 cursor-pointer'
           }`}
         >
+          {/* File Picker input */}
           <input
             ref={fileInputRef}
             type="file"
@@ -409,14 +633,57 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
             className="hidden"
           />
 
+          {/* Native Mobile Camera input fallback */}
+          <input
+            ref={cameraFallbackInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={(e) => e.target.files?.[0] && handleImageFile(e.target.files[0])}
+            className="hidden"
+          />
+
           {!imagePreview ? (
-            <div className="space-y-2 py-4">
-              <Camera className="w-6 h-6 text-neutral-400 mx-auto" />
-              <span className="text-xs font-medium text-neutral-900 dark:text-white block">
-                Cole a foto (<kbd className="font-mono">Ctrl + V</kbd>) ou clique para enviar
-              </span>
-              <span className="text-[11px] text-neutral-400 block">
-                Prioriza o ID e o MLB da Coluna G do seu CSV ({csvItems.length} registros)
+            <div className="space-y-4 py-3">
+              <div className="w-12 h-12 rounded-full bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mx-auto text-neutral-700 dark:text-neutral-200">
+                <Camera className="w-6 h-6" />
+              </div>
+
+              <div className="space-y-1">
+                <span className="text-sm font-semibold text-neutral-900 dark:text-white block">
+                  Tire uma foto com a câmera ou envie a imagem
+                </span>
+                <span className="text-xs text-neutral-400 block">
+                  Use a câmera do seu dispositivo, cole (<kbd className="font-mono px-1 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-[10px]">Ctrl + V</kbd>) ou envie um arquivo
+                </span>
+              </div>
+
+              {/* ACTION BUTTONS */}
+              <div
+                className="flex flex-wrap items-center justify-center gap-3 pt-2"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => openCameraModal()}
+                  className="px-4 py-2.5 text-xs font-semibold rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-2 shadow-xs cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Usar Câmera</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-4 py-2.5 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-200 hover:border-neutral-900 dark:hover:border-neutral-400 flex items-center gap-2 cursor-pointer bg-neutral-50/50 dark:bg-neutral-950/50"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Escolher Arquivo</span>
+                </button>
+              </div>
+
+              <span className="text-[11px] text-neutral-400 block pt-1">
+                Cruza automaticamente com o ID e o MLB da Coluna G do seu CSV ({csvItems.length} registros)
               </span>
             </div>
           ) : (
@@ -442,15 +709,25 @@ export const GeminiPhotoScanner: React.FC<GeminiPhotoScannerProps> = ({ csvItems
 
               <div className="text-left space-y-2">
                 <span className="text-xs font-medium text-neutral-900 dark:text-white block">
-                  Imagem selecionada
+                  Foto pronta para análise
                 </span>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white underline cursor-pointer"
-                >
-                  Trocar imagem
-                </button>
+                <div className="flex flex-col gap-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => openCameraModal()}
+                    className="text-xs text-neutral-800 dark:text-neutral-200 hover:underline flex items-center gap-1.5 cursor-pointer font-medium"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Tirar nova foto com a câmera</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white underline cursor-pointer text-left"
+                  >
+                    Escolher outro arquivo
+                  </button>
+                </div>
               </div>
             </div>
           )}

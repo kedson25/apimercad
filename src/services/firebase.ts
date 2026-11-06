@@ -104,6 +104,21 @@ async function idbDeleteOne(id: string): Promise<void> {
   });
 }
 
+async function idbClearAll(): Promise<void> {
+  const db = await openDestiIdb();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 /**
  * Salva um único item do CSV em seu próprio documento (ID do documento = ID do CSV), incluindo a Coluna G (MLB)
  */
@@ -410,5 +425,22 @@ export async function deleteItemFromDesti(id: string): Promise<void> {
     } catch {
       firestoreQuotaExhausted = true;
     }
+  }
+}
+
+/**
+ * Exclui todos os documentos salvos no IndexedDB e no servidor
+ */
+export async function clearAllItemsFromDesti(): Promise<void> {
+  // 1. Limpa IndexedDB local
+  await idbClearAll();
+
+  // 2. Limpa no servidor
+  try {
+    await fetch('/api/desti/all', { method: 'DELETE' });
+  } catch {
+    try {
+      await fetch('/api/desti/clear', { method: 'POST' });
+    } catch {}
   }
 }

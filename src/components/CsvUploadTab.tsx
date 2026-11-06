@@ -20,6 +20,7 @@ import {
   saveAllCsvItemsToDesti,
   saveCsvItemToDesti,
   deleteItemFromDesti,
+  clearAllItemsFromDesti,
   UploadProgressInfo,
 } from '../services/firebase';
 import { extractMlbCodes, normalizeMlbCode, formatMercadoLivreUrl } from '../utils/mlUrl';
@@ -44,6 +45,8 @@ export const CsvUploadTab: React.FC<CsvUploadTabProps> = ({ items, onItemsChange
   const [currentPage, setCurrentPage] = useState(1);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [isClearingAll, setIsClearingAll] = useState(false);
+  const [showConfirmClearModal, setShowConfirmClearModal] = useState(false);
   const [isSavingManual, setIsSavingManual] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -272,6 +275,21 @@ export const CsvUploadTab: React.FC<CsvUploadTabProps> = ({ items, onItemsChange
     } catch {}
   };
 
+  const handleClearAllCsv = async () => {
+    setIsClearingAll(true);
+    setErrorMessage(null);
+    try {
+      await clearAllItemsFromDesti();
+      onItemsChange([]);
+      setShowConfirmClearModal(false);
+      setStatusMessage('Todos os documentos do CSV foram apagados.');
+    } catch (err: any) {
+      setErrorMessage('Erro ao apagar documentos: ' + (err.message || 'Erro desconhecido'));
+    } finally {
+      setIsClearingAll(false);
+    }
+  };
+
   const copyId = (text: string, key?: string) => {
     navigator.clipboard.writeText(text);
     setCopiedId(key || text);
@@ -391,6 +409,53 @@ export const CsvUploadTab: React.FC<CsvUploadTabProps> = ({ items, onItemsChange
         </div>
       )}
 
+      {/* CONFIRM CLEAR ALL CSV MODAL */}
+      {showConfirmClearModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg max-w-sm w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-3 text-rose-600">
+              <div className="p-2 rounded-full bg-rose-50 dark:bg-rose-950/40">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <h3 className="text-sm font-semibold text-neutral-900 dark:text-white">
+                Apagar Todos os CSVs?
+              </h3>
+            </div>
+            <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
+              Tem certeza de que deseja apagar todos os <strong>{items.length}</strong> documentos da base? Essa ação removerá todos os dados do banco local e do servidor.
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isClearingAll}
+                onClick={() => setShowConfirmClearModal(false)}
+                className="px-3 py-1.5 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isClearingAll}
+                onClick={handleClearAllCsv}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+              >
+                {isClearingAll ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Apagando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Sim, Apagar Tudo</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* UPLOAD & MANUAL ADD */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-6 flex flex-col justify-between">
@@ -401,15 +466,29 @@ export const CsvUploadTab: React.FC<CsvUploadTabProps> = ({ items, onItemsChange
                 Carregar CSV ({items.length} na base)
               </span>
             </div>
-            <button
-              type="button"
-              onClick={handleSync}
-              disabled={isLoading}
-              className="text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white flex items-center gap-1.5 cursor-pointer"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-              <span>Sincronizar</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSync}
+                disabled={isLoading || isClearingAll}
+                className="text-xs text-neutral-500 hover:text-neutral-900 dark:hover:text-white flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                <span>Sincronizar</span>
+              </button>
+              {items.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmClearModal(true)}
+                  disabled={isLoading || isClearingAll}
+                  className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300 flex items-center gap-1.5 cursor-pointer ml-1"
+                  title="Apagar todos os documentos do CSV"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Apagar CSVs</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div

@@ -176,6 +176,16 @@ app.delete('/api/desti/doc/:id', (req: Request, res: Response) => {
   return res.json({ success: true });
 });
 
+app.delete('/api/desti/all', (_req: Request, res: Response) => {
+  writeDestiStore({});
+  return res.json({ success: true, count: 0 });
+});
+
+app.post('/api/desti/clear', (_req: Request, res: Response) => {
+  writeDestiStore({});
+  return res.json({ success: true, count: 0 });
+});
+
 
 // Credentials dynamically resolved from Vercel Environment Variables (ML_CLIENT_ID, ML_CLIENT_SECRET, ML_REDIRECT_URI)
 const DEFAULT_CONFIG = {
