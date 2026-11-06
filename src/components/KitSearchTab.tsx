@@ -1,74 +1,220 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
-  Boxes,
   Search,
   ExternalLink,
-  Sparkles,
-  CheckCircle2,
   AlertCircle,
   Copy,
   Check,
   Plus,
-  FileSpreadsheet,
-  Database,
-  ArrowRight,
-  DollarSign,
-  Tag,
+  Trash2,
+  X,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { CsvItem, KitSearchResult } from '../types/csvMatcher';
 import { searchKitsOnMercadoLivre } from '../services/mlApi';
+import { formatMercadoLivreUrl } from '../utils/mlUrl';
 
 interface KitSearchTabProps {
   csvItems: CsvItem[];
-  onSelectCsvItem?: (item: CsvItem) => void;
 }
 
-const PRESET_KITS = [
-  {
-    label: 'Kit Lixeiras Cozinha + Banheiro',
-    itens: 'Lixeira Basculante 12 Litros Banheiro Escritorio Pia Cozinha + Kit 2 Lixeira Cesto Cozinha Banheiro 09l Inox Tampa Click',
-    desc: 'Conjunto completo de lixeiras inox click e basculante para escritório e pia.',
-  },
-  {
-    label: 'Controle Switch Pro + Stand Zelda 40th',
-    itens: 'Controle Joystick Sem Fio Nintendo Switch Nintendo Ns2 Pro Controller + Stand The Legend Of Zelda 40th Anniversary Edition',
-    desc: 'Controle edição especial verde preto dourado com suporte stand incluso.',
-  },
-  {
-    label: 'Kit 10 Anilhas Latão Tubo 1/8',
-    itens: 'Kit 10 Anilhas De Latão Para Compressão P/tubo De 1/8',
-    desc: 'Anilhas de alta precisão para conexão e compressão em tubulações.',
-  },
-  {
-    label: 'Cuba Inox Gourmet + Cesto Drenagem',
-    itens: 'Cuba Inox Gourmet Cozinha Quadrada 60x40 Com Cesto Drenagem Preto',
-    desc: 'Cuba quadrada acabamento preto com cesto escorredor embutido.',
-  },
-];
+const MATCHES_PER_PAGE = 10;
+
+const PT_STOP_WORDS = new Set([
+  'de', 'da', 'do', 'das', 'dos', 'em', 'no', 'na', 'nos', 'nas',
+  'para', 'p/', 'pra', 'por', 'com', 'sem', 'sob', 'sobre',
+  'e', 'ou', 'a', 'o', 'as', 'os', 'um', 'uma', 'uns', 'umas',
+  'que', 'se', 'ao', 'aos', 'ref', 'tipo', 'novo', 'nova',
+]);
+
+function normalizeText(text: string): string {
+  return (text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\w\s\d]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractItemKeywords(text: string): string[] {
+  const words = normalizeText(text).split(' ');
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const w of words) {
+    const clean = w.trim();
+    if (!clean || clean.length < 2 || PT_STOP_WORDS.has(clean) || seen.has(clean)) continue;
+    seen.add(clean);
+    result.push(clean);
+  }
+  return result;
+}
 
 export const KitSearchTab: React.FC<KitSearchTabProps> = ({ csvItems }) => {
-  const [itemNames, setItemNames] = useState(PRESET_KITS[0].itens);
-  const [description, setDescription] = useState(PRESET_KITS[0].desc);
+  // Separate input field for each item in the kit (starts with 2 fields by default)
+  const [kitInputs, setKitInputs] = useState<string[]>(['', '']);
+  const [description, setDescription] = useState('');
+  const [submittedItems, setSubmittedItems] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<KitSearchResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+
+  const updateKitInput = (index: number, value: string) => {
+    setKitInputs((prev) => {
+      const next = [...prev];
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const addKitInputField = () => {
+    setKitInputs((prev) => [...prev, '']);
+  };
+
+  const removeKitInputField = (index: number) => {
+    setKitInputs((prev) => {
+      if (prev.length <= 1) return [''];
+      return prev.filter((_, idx) => idx !== index);
+    });
+  };
+
+  const clearAllFields = () => {
+    setKitInputs(['', '']);
+    setDescription('');
+    setSubmittedItems([]);
+    setResult(null);
+    setErrorMessage(null);
+    setCurrentPage(1);
+  };
+
+  const filledItems = useMemo(
+    () => kitInputs.map((item) => item.trim()).filter(Boolean),
+    [kitInputs]
+  );
+
+  // Rank CSV / Firebase items based on how many of the typed kit items they match
+  const localKitMatches = useMemo(() => {
+    if (submittedItems.length === 0 || csvItems.length === 0) return [];
+
+    const itemKeywordGroups = submittedItems.map((rawItem) => ({
+      rawItem,
+      keywords: extractItemKeywords(rawItem),
+    })).filter((g) => g.keywords.length > 0);
+
+    if (itemKeywordGroups.length === 0) return [];
+
+    const allKeywords = Array.from(
+      new Set(itemKeywordGroups.flatMap((g) => g.keywords))
+    );
+
+    const scored: Array<{
+      item: CsvItem;
+      matchedItemsCount: number;
+      totalItemsSearched: number;
+      matchedKeywords: string[];
+      isKitRow: boolean;
+      score: number;
+    }> = [];
+
+    for (const csvItem of csvItems) {
+      const normDesc = ` ${normalizeText(csvItem.itens)} `;
+      let matchedItemsCount = 0;
+      const matchedKeywordsSet = new Set<string>();
+
+      for (const group of itemKeywordGroups) {
+        let groupHitCount = 0;
+        for (const kw of group.keywords) {
+          if (normDesc.includes(` ${kw} `) || normDesc.includes(kw)) {
+            groupHitCount++;
+            matchedKeywordsSet.add(kw);
+          }
+        }
+        const minForGroup =
+          group.keywords.length <= 2
+            ? group.keywords.length
+            : Math.ceil(group.keywords.length * 0.5);
+        if (groupHitCount >= Math.max(1, minForGroup)) {
+          matchedItemsCount++;
+        }
+      }
+
+      if (matchedKeywordsSet.size === 0) continue;
+
+      // Require at least 1 typed item matched (or strong keyword overlap)
+      if (matchedItemsCount === 0 && matchedKeywordsSet.size < 2) continue;
+
+      const isKitRow =
+        /\b(kit|combo|conjunto|par|pares|unidades|pecas|pcs)\b/i.test(csvItem.itens) ||
+        csvItem.itens.includes('+') ||
+        Number(csvItem.qtdItens || '1') > 1;
+
+      const allTypedItemsMatched = matchedItemsCount === itemKeywordGroups.length;
+      const itemCoverageScore =
+        (matchedItemsCount / Math.max(itemKeywordGroups.length, 1)) * 60;
+      const kwCoverageScore =
+        (matchedKeywordsSet.size / Math.max(allKeywords.length, 1)) * 30;
+      const bonus = (allTypedItemsMatched ? 25 : 0) + (isKitRow ? 10 : 0);
+
+      scored.push({
+        item: csvItem,
+        matchedItemsCount,
+        totalItemsSearched: itemKeywordGroups.length,
+        matchedKeywords: Array.from(matchedKeywordsSet),
+        isKitRow,
+        score: Math.min(100, Math.round(itemCoverageScore + kwCoverageScore + bonus)),
+      });
+    }
+
+    scored.sort((a, b) => {
+      if (b.matchedItemsCount !== a.matchedItemsCount) {
+        return b.matchedItemsCount - a.matchedItemsCount;
+      }
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return b.matchedKeywords.length - a.matchedKeywords.length;
+    });
+
+    return scored;
+  }, [submittedItems, csvItems]);
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!itemNames.trim()) {
-      setErrorMessage('Informe o nome dos itens para pesquisar o kit.');
+    if (filledItems.length === 0) {
+      setErrorMessage('Digite pelo menos um item em uma das áreas para pesquisar o kit.');
       return;
     }
 
+    setSubmittedItems(filledItems);
+    setCurrentPage(1);
     setIsLoading(true);
     setErrorMessage(null);
 
+    const combinedQuery = filledItems.join(' + ');
+
+    // Send only top candidate CSV items to backend to keep request fast even with huge CSVs
+    const allSearchKws = extractItemKeywords(`${combinedQuery} ${description}`);
+    const topCandidates = [...csvItems]
+      .map((it) => {
+        const norm = normalizeText(it.itens);
+        let hits = 0;
+        for (const kw of allSearchKws) {
+          if (norm.includes(kw)) hits++;
+        }
+        return { it, hits };
+      })
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, 60)
+      .map((x) => x.it);
+
     try {
-      const data = await searchKitsOnMercadoLivre(itemNames, description, csvItems);
+      const data = await searchKitsOnMercadoLivre(combinedQuery, description, topCandidates);
       setResult(data);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Erro ao pesquisar kits no Mercado Livre');
+      setErrorMessage(err.message || 'Erro ao pesquisar kits');
     } finally {
       setIsLoading(false);
     }
@@ -77,320 +223,382 @@ export const KitSearchTab: React.FC<KitSearchTabProps> = ({ csvItems }) => {
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
+    setTimeout(() => setCopiedKey(null), 1800);
   };
 
-  const applyPreset = (preset: typeof PRESET_KITS[0]) => {
-    setItemNames(preset.itens);
-    setDescription(preset.desc);
-    setResult(null);
+  const highlightText = (text: string, wordsToHighlight: string[]) => {
+    if (!wordsToHighlight || wordsToHighlight.length === 0) return text;
+    const cleanWords = wordsToHighlight
+      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .filter((w) => w.length >= 2);
+    if (cleanWords.length === 0) return text;
+
+    try {
+      const regex = new RegExp(`(${cleanWords.join('|')})`, 'gi');
+      const parts = text.split(regex);
+      return parts.map((part, i) =>
+        regex.test(part) ? (
+          <mark
+            key={i}
+            className="bg-neutral-200 dark:bg-neutral-700 text-neutral-950 dark:text-white px-1 rounded font-semibold"
+          >
+            {part}
+          </mark>
+        ) : (
+          part
+        )
+      );
+    } catch {
+      return text;
+    }
   };
+
+  const totalPages = Math.max(1, Math.ceil(localKitMatches.length / MATCHES_PER_PAGE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedMatches = localKitMatches.slice(
+    (safePage - 1) * MATCHES_PER_PAGE,
+    safePage * MATCHES_PER_PAGE
+  );
 
   return (
     <div className="space-y-6">
-      {/* HERO / INTRO */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xs">
-        {/* PRESET CHIPS */}
-        <div className="mt-4">
-          <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block mb-2">
-            Exemplos Rápidos de Kits do seu Catálogo:
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {PRESET_KITS.map((p, idx) => (
+      <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-6">
+        <form onSubmit={handleSearch} className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <label className="text-xs font-semibold text-neutral-900 dark:text-white uppercase tracking-wider block">
+                Itens do Kit (1 item por campo)
+              </label>
+              <span className="text-[11px] text-neutral-500">
+                Digite cada produto em sua própria área para localizar o kit correspondente
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
               <button
-                key={idx}
                 type="button"
-                onClick={() => applyPreset(p)}
-                className="text-xs px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-amber-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors flex items-center gap-1.5"
+                onClick={addKitInputField}
+                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 dark:hover:border-neutral-500 transition-colors flex items-center gap-1 cursor-pointer"
               >
-                <Plus className="w-3 h-3 text-amber-500" />
-                <span>{p.label}</span>
+                <Plus className="w-3.5 h-3.5" />
+                <span>Mais 1 item</span>
               </button>
+
+              {(filledItems.length > 0 || description.trim() !== '' || result) && (
+                <button
+                  type="button"
+                  onClick={clearAllFields}
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-md text-neutral-500 hover:text-rose-600 transition-colors cursor-pointer"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* SEPARATE INPUT AREAS FOR EACH KIT ITEM */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+            {kitInputs.map((itemValue, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[11px] font-mono font-semibold text-neutral-400 select-none">
+                    #{idx + 1}
+                  </span>
+                  <input
+                    type="text"
+                    value={itemValue}
+                    onChange={(e) => updateKitInput(idx, e.target.value)}
+                    placeholder={
+                      idx === 0
+                        ? 'Item 1 (ex: Lixeira Basculante 12 Litros)'
+                        : idx === 1
+                        ? 'Item 2 (ex: Kit 2 Lixeira Inox 9L Tampa Click)'
+                        : `Item ${idx + 1} do kit...`
+                    }
+                    className="w-full pl-9 pr-8 py-2 text-xs bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md text-neutral-900 dark:text-white focus:outline-hidden focus:border-neutral-900 dark:focus:border-neutral-400"
+                  />
+                  {itemValue && (
+                    <button
+                      type="button"
+                      onClick={() => updateKitInput(idx, '')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {kitInputs.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeKitInputField(idx)}
+                    title="Remover este campo"
+                    className="p-2 rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-400 hover:text-rose-600 transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             ))}
           </div>
-        </div>
 
-        {/* SEARCH FORM */}
-        <form onSubmit={handleSearch} className="mt-5 space-y-4">
-          <div>
-            <label className="text-xs font-bold text-slate-900 dark:text-white block mb-1">
-              Nomes dos Itens / Composição do Kit:
-            </label>
-            <textarea
-              rows={3}
-              value={itemNames}
-              onChange={(e) => setItemNames(e.target.value)}
-              placeholder="Ex: Lixeira Basculante 12 Litros + Kit 2 Lixeira Inox 9L Tampa Click"
-              className="w-full p-3 text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs font-bold text-slate-900 dark:text-white block mb-1">
-              Descrição adicional / Observações do Kit (Opcional):
-            </label>
-            <input
-              type="text"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Ex: Cor preta, inox, acabamento premium, voltagem ou quantidade de peças"
-              className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-amber-400"
-            />
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
-            <span className="text-[11px] text-slate-400 flex items-center gap-1">
-              <Database className="w-3.5 h-3.5 text-amber-500" />
-              Cruzará com <strong>{csvItems.length} itens</strong> da coleção desti do Firebase
-            </span>
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pt-1">
+            <div className="flex-1">
+              <label className="text-[11px] font-medium text-neutral-500 block mb-1">
+                Observações / Detalhes Adicionais (Opcional)
+              </label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Ex: Inox, cor preta, voltagem, quantidade..."
+                className="w-full px-3 py-2 text-xs bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded-md text-neutral-900 dark:text-white focus:outline-hidden focus:border-neutral-900"
+              />
+            </div>
 
             <button
               type="submit"
-              disabled={isLoading || !itemNames.trim()}
-              className="px-5 py-2.5 text-xs font-bold rounded-lg bg-amber-400 text-slate-950 hover:bg-amber-300 disabled:opacity-50 transition-colors flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+              disabled={isLoading || filledItems.length === 0}
+              className="px-4 py-2 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 disabled:opacity-40 transition-opacity flex items-center justify-center gap-2 cursor-pointer shrink-0"
             >
               {isLoading ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                  <span>Buscando Kits no Mercado Livre...</span>
+                  <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                  <span>O sistema está buscando...</span>
                 </>
               ) : (
                 <>
-                  <Search className="w-4 h-4" />
-                  <span>Pesquisar Kits no Mercado Livre</span>
+                  <Search className="w-3.5 h-3.5" />
+                  <span>Buscar Kit ({filledItems.length})</span>
                 </>
               )}
             </button>
           </div>
         </form>
 
-        {/* ERROR */}
         {errorMessage && (
-          <div className="mt-4 p-4 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200 text-xs flex items-start gap-2.5">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-            <div>
-              <span className="font-semibold block">Erro na Pesquisa de Kits</span>
-              <span>{errorMessage}</span>
-            </div>
+          <div className="mt-4 p-3 rounded-md bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{errorMessage}</span>
           </div>
         )}
       </div>
 
-      {/* RESULTS DISPLAY */}
-      {result && (
-        <div className="space-y-6">
-          {/* 1. KIT OVERVIEW CARD */}
-          <div className="bg-gradient-to-br from-amber-500/15 via-white to-emerald-500/10 dark:from-slate-900 dark:via-slate-900 dark:to-emerald-950/20 border-2 border-amber-400 dark:border-amber-500 rounded-xl p-6 shadow-sm space-y-4">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-amber-300/40 dark:border-slate-800">
-              <div className="space-y-1">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 dark:text-amber-400 flex items-center gap-1.5">
-                  <Boxes className="w-3.5 h-3.5" />
-                  Kit Oficial Formulado para o Mercado Livre
-                </span>
-                <h3 className="text-base sm:text-lg font-extrabold text-slate-950 dark:text-white">
-                  {result.kitTitle}
-                </h3>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Preço Médio</span>
-                  <span className="text-sm font-bold font-mono text-emerald-600 dark:text-emerald-400">
-                    {result.estimatedPrice}
-                  </span>
-                </div>
-
-                <a
-                  href={result.mercadoLivreSearchUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-4 py-2 text-xs font-bold rounded-lg bg-slate-950 text-white dark:bg-amber-400 dark:text-slate-950 hover:opacity-90 transition-opacity flex items-center gap-1.5 shadow-xs shrink-0"
-                >
-                  <span>Abrir Busca no ML</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              </div>
-            </div>
-
-            {/* Description & Components */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="p-3.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 space-y-2">
-                <span className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                  Descrição & Montagem do Kit
-                </span>
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                  {result.kitDescription}
-                </p>
-              </div>
-
-              <div className="p-3.5 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 space-y-2">
-                <span className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                  <Tag className="w-4 h-4 text-amber-500" />
-                  Componentes Identificados
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {result.components?.map((c, i) => (
-                    <span
-                      key={i}
-                      className="text-xs px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 font-medium border border-slate-200 dark:border-slate-700"
-                    >
-                      {c}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Keywords */}
-            <div>
-              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 block mb-1.5">
-                Palavras-Chave do Kit Extraídas para o Mercado Livre:
+      {/* 1. PERFECT KIT MATCHES IN FIREBASE / CSV (ONLY SHOWN WHEN MATCHES EXIST) */}
+      {submittedItems.length > 0 && localKitMatches.length > 0 && (
+        <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
+          <div className="px-6 py-3.5 bg-neutral-50 dark:bg-neutral-950 border-b border-neutral-200 dark:border-neutral-800 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-neutral-900 dark:text-white uppercase tracking-wider">
+                Match de Kit na Base ({localKitMatches.length})
               </span>
-              <div className="flex flex-wrap gap-1">
-                {result.keywords?.map((kw, i) => (
-                  <span
-                    key={i}
-                    className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-amber-400/20 text-amber-900 dark:text-amber-300 border border-amber-400/30"
-                  >
-                    {kw}
-                  </span>
-                ))}
-              </div>
+              {localKitMatches[0].matchedItemsCount === submittedItems.length && submittedItems.length > 1 && (
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-neutral-900 text-white dark:bg-white dark:text-neutral-950">
+                  Todos os {submittedItems.length} itens encontrados juntos
+                </span>
+              )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                const ids = localKitMatches.map((m) => m.item.id);
+                copyToClipboard(ids.join('\n'), 'all-kit-ids');
+              }}
+              className="px-2.5 py-1 text-xs font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+            >
+              {copiedKey === 'all-kit-ids' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+              <span>Copiar IDs</span>
+            </button>
           </div>
 
-          {/* 2. MERCADO LIVRE ADS GRID */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xs space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                  <ExternalLink className="w-4 h-4 text-amber-500" />
-                  Anúncios e Variações de Kits no Mercado Livre Brasil ({result.ads?.length || 0})
-                </h4>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Anúncios prontos com termos de busca diretos e cruzamento de palavras-chave.
-                </p>
+          <div className="divide-y divide-neutral-100 dark:divide-neutral-800/60">
+            {paginatedMatches.map((match, idx) => {
+              const isTopMatch = safePage === 1 && idx === 0;
+              const colGMlb = match.item.mlbId || match.item.mlb || '';
+              return (
+                <div
+                  key={match.item.id}
+                  className={`px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                    isTopMatch ? 'bg-neutral-50/60 dark:bg-neutral-950/50' : ''
+                  }`}
+                >
+                  <div className="space-y-1 min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span
+                        className={`font-mono font-bold text-neutral-900 dark:text-white tabular-nums ${
+                          isTopMatch ? 'text-base' : 'text-xs'
+                        }`}
+                      >
+                        ID: {match.item.id}
+                      </span>
+
+                      {colGMlb && (
+                        <span className="text-xs font-mono text-neutral-600 dark:text-neutral-300 tabular-nums">
+                          · Col. G: {colGMlb}
+                        </span>
+                      )}
+
+                      <span className="text-[11px] font-mono px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-400 tabular-nums">
+                        {match.matchedItemsCount}/{match.totalItemsSearched} itens do kit
+                      </span>
+
+                      {match.item.valorReal && (
+                        <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                          · R$ {match.item.valorReal}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-neutral-800 dark:text-neutral-200 leading-relaxed">
+                      {highlightText(match.item.itens, match.matchedKeywords)}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {colGMlb && (
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(colGMlb, `kit-mlb-csv-${match.item.id}`)}
+                        className="px-2.5 py-1.5 text-xs font-mono rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedKey === `kit-mlb-csv-${match.item.id}` ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>MLB</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(match.item.id, `kit-csv-${match.item.id}`)}
+                      className="px-3 py-1.5 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {copiedKey === `kit-csv-${match.item.id}` ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                      <span>{copiedKey === `kit-csv-${match.item.id}` ? 'Copiado' : 'Copiar ID'}</span>
+                    </button>
+
+                    <a
+                      href={formatMercadoLivreUrl(match.item.itens, colGMlb)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1"
+                    >
+                      <span>Anúncio ML</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {totalPages > 1 && (
+            <div className="px-6 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-between text-xs text-neutral-500">
+              <span className="font-mono tabular-nums">
+                Página {safePage} de {totalPages}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  className="p-1.5 rounded border border-neutral-200 dark:border-neutral-800 disabled:opacity-40 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  className="p-1.5 rounded border border-neutral-200 dark:border-neutral-800 disabled:opacity-40 cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
+          )}
+        </div>
+      )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {result.ads?.map((ad, idx) => (
-                <div
-                  key={idx}
-                  className="p-3.5 bg-slate-50 dark:bg-slate-950/60 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-amber-400 transition-colors space-y-2 flex flex-col justify-between"
-                >
-                  <div>
-                    <div className="flex items-start justify-between gap-2 mb-1">
+      {/* 2. MERCADO LIVRE KIT RESULTS */}
+      {result && (
+        <div className="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-lg p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-neutral-200 dark:border-neutral-800">
+            <div>
+              <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider block">
+                Kit Sugerido no Mercado Livre
+              </span>
+              <h3 className="text-sm font-semibold text-neutral-900 dark:text-white">
+                {result.kitTitle}
+              </h3>
+              <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                {result.estimatedPrice}
+              </span>
+            </div>
+
+            <a
+              href={result.mercadoLivreSearchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3.5 py-1.5 text-xs font-medium rounded-md bg-neutral-900 text-white dark:bg-white dark:text-neutral-950 hover:opacity-90 flex items-center gap-1.5 self-start sm:self-auto"
+            >
+              <span>Abrir Kit no ML</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
+
+          {result.ads && result.ads.length > 0 && (
+            <div className="divide-y divide-neutral-100 dark:divide-neutral-800/60">
+              {result.ads.map((ad, idx) => (
+                <div key={idx} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
                       {ad.mlbId && (
-                        <span className="text-[11px] font-mono font-extrabold px-2 py-0.5 rounded bg-amber-400 text-slate-950 inline-flex items-center gap-1">
+                        <span className="text-xs font-mono font-semibold text-neutral-900 dark:text-neutral-200 tabular-nums">
                           {ad.mlbId}
                         </span>
                       )}
-                      <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
+                      <span className="text-[11px] font-mono text-neutral-500 tabular-nums">
                         {ad.price}
                       </span>
                     </div>
-
-                    <span className="text-xs font-bold text-slate-900 dark:text-white line-clamp-2 block">
+                    <p className="text-xs text-neutral-700 dark:text-neutral-300 truncate">
                       {ad.title}
-                    </span>
-
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {ad.matchedKeywords?.slice(0, 5).map((mk, kIdx) => (
-                        <span
-                          key={kIdx}
-                          className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-800 dark:text-emerald-300 border border-emerald-500/20"
-                        >
-                          {mk}
-                        </span>
-                      ))}
-                    </div>
+                    </p>
                   </div>
 
-                  <div className="pt-2 flex items-center justify-between border-t border-slate-200 dark:border-slate-800 text-[11px]">
-                    <span className="text-slate-400">Relevância: {ad.relevance || 'Alta'}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {ad.mlbId && (
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(ad.mlbId || '', `kit-mlb-${idx}`)}
+                        className="px-2 py-1 text-[11px] font-mono rounded border border-neutral-200 dark:border-neutral-800 text-neutral-600 dark:text-neutral-300 hover:border-neutral-900 flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedKey === `kit-mlb-${idx}` ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                        <span>MLB</span>
+                      </button>
+                    )}
                     <a
                       href={ad.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="px-2.5 py-1 text-xs font-bold rounded bg-slate-950 text-white dark:bg-amber-400 dark:text-slate-950 hover:opacity-90 transition-opacity flex items-center gap-1"
+                      className="px-2.5 py-1 text-[11px] font-medium rounded border border-neutral-200 dark:border-neutral-800 text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 flex items-center gap-1"
                     >
-                      <span>Abrir Anúncio no ML</span>
+                      <span>Link</span>
                       <ExternalLink className="w-3 h-3" />
                     </a>
                   </div>
                 </div>
               ))}
             </div>
-          </div>
-
-          {/* 3. MATCHING ITEMS FROM DESTI COLLECTION */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xs space-y-4">
-            <div>
-              <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                <Database className="w-4 h-4 text-emerald-500" />
-                Itens Identificados na Coleção 'desti' do Firebase que Compõem o Kit ({result.matchingCsvItems?.length || 0})
-              </h4>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                A IA cruzou os componentes do kit com os documentos salvos na coleção desti para revelar os IDs exatos correspondentes.
-              </p>
-            </div>
-
-            {result.matchingCsvItems && result.matchingCsvItems.length > 0 ? (
-              <div className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-x-auto">
-                <table className="w-full text-left text-xs divide-y divide-slate-100 dark:divide-slate-800">
-                  <thead className="bg-slate-50 dark:bg-slate-950 text-slate-500 font-semibold">
-                    <tr>
-                      <th className="py-2.5 px-3">ID (Documento desti)</th>
-                      <th className="py-2.5 px-3">Descrição do Item</th>
-                      <th className="py-2.5 px-3 text-right">Valor R$</th>
-                      <th className="py-2.5 px-3 text-center">Palavras Coincidentes</th>
-                      <th className="py-2.5 px-3 text-center">Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
-                    {result.matchingCsvItems.map((item) => (
-                      <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                        <td className="py-2.5 px-3 font-mono font-bold text-slate-900 dark:text-amber-300 tabular-nums whitespace-nowrap">
-                          {item.id}
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-800 dark:text-slate-200 max-w-md">
-                          {item.itens}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono text-right text-emerald-600 dark:text-emerald-400 tabular-nums whitespace-nowrap">
-                          {item.valorReal ? `R$ ${item.valorReal}` : '—'}
-                        </td>
-                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-800 dark:text-emerald-300">
-                            {item.matchCount} palavras
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => copyToClipboard(item.id, `kit-${item.id}`)}
-                            className="px-2.5 py-1 text-xs font-semibold rounded bg-amber-400 text-slate-950 hover:bg-amber-300 transition-colors inline-flex items-center gap-1"
-                          >
-                            {copiedKey === `kit-${item.id}` ? (
-                              <Check className="w-3 h-3 text-emerald-800" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                            <span>{copiedKey === `kit-${item.id}` ? 'Copiado!' : 'Copiar ID'}</span>
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-950 text-slate-500 text-xs text-center">
-                Nenhum item do catálogo atual atingiu os critérios de combinação para este kit.
-              </div>
-            )}
-          </div>
+          )}
         </div>
       )}
     </div>

@@ -129,7 +129,7 @@ export async function scanPhotoWithGemini(imageBase64: string, mimeType?: string
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data.error || 'Erro ao escanear foto com Gemini');
+    throw new Error(data.error || 'Erro ao processar leitura da foto');
   }
   return data.data;
 }
@@ -167,3 +167,32 @@ export async function searchKitsOnMercadoLivre(
   }
   return data.data;
 }
+
+export interface MlbNameSearchItemResult {
+  query: string;
+  primaryMlbId: string;
+  searchUrl: string;
+  ads: Array<{
+    mlbId: string;
+    title: string;
+    price: string;
+    url: string;
+    searchUrl?: string;
+    condition?: string;
+    sellerType?: string;
+  }>;
+}
+
+export async function searchMlbByNames(queries: string[]): Promise<MlbNameSearchItemResult[]> {
+  const res = await fetch('/api/ml/search-name', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || 'Erro ao buscar códigos MLB no Mercado Livre');
+  }
+  return data.results || [];
+}
+

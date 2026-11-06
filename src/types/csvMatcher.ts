@@ -5,6 +5,8 @@ export interface CsvItem {
   valorReal?: string;
   qtdItens?: string;
   cepBuyer?: string;
+  /** Coluna G: MLB (um ou mais códigos MLB do produto/kit no CSV de destinação) */
+  mlb?: string;
   mlbId?: string;
   matchScore?: number;
   matchReason?: string;
@@ -41,6 +43,7 @@ export interface CsvMatchResult {
   allRankedMatches?: Array<{
     id: string;
     itens: string;
+    mlb?: string;
     confidenceScore: number;
     matchedKeywords: string[];
     matchCount: number;
@@ -59,6 +62,7 @@ export interface KitSearchResult {
   matchingCsvItems: Array<{
     id: string;
     itens: string;
+    mlb?: string;
     valorReal?: string;
     matchedKeywords: string[];
     matchCount: number;

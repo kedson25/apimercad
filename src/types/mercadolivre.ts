@@ -110,6 +110,9 @@ export interface MlbItemAd {
 
 export interface GeminiPhotoScanResult {
   productName: string;
+  translatedText?: string;
+  kitSuggestion?: string;
+  keywords?: string[];
   brand?: string;
   model?: string;
   category?: string;
@@ -123,3 +126,4 @@ export interface GeminiPhotoScanResult {
   keyFeatures?: string[];
   confidence?: string;
 }
+
