@@ -1,0 +1,4 @@
+node_modules/
+dist/
+desti_documents.json
+*.log

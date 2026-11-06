@@ -6,3 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
+desti_documents.json
