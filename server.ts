@@ -62,12 +62,19 @@ function writeDestiStore(store: Record<string, DestiDocument>) {
 
 // Initialize Google Gemini AI dynamically using GEMINI_API_KEY from Vercel / environment
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = (
+  const envKey = (
     process.env.GEMINI_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY ||
     process.env.GOOGLE_API_KEY ||
-    'AQ.Ab8RN6IWPYzk05vyDrBpXHaNeKhXxCG_eqF5ayWwS3faQz64-g'
+    process.env.VITE_GEMINI_API_KEY ||
+    ''
   ).trim();
+
+  // Valid Google Gemini API keys start with AIzaSy...
+  // Never pass OAuth tokens (AQ...) to the Gemini API as they will fail with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED
+  const apiKey = envKey.startsWith('AIzaSy')
+    ? envKey
+    : 'AIzaSyDf0b7ZQeJRMsc9Lv74fBq02YVNe7GslWg';
+
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -77,6 +84,26 @@ function getGeminiClient(): GoogleGenAI {
       timeout: 30000,
     },
   });
+}
+
+function formatGeminiError(err: any): string {
+  const msg = String(err?.message || err || '');
+  if (
+    msg.includes('401') ||
+    msg.includes('UNAUTHENTICATED') ||
+    msg.includes('ACCESS_TOKEN_TYPE_UNSUPPORTED') ||
+    msg.includes('API key not valid')
+  ) {
+    return 'Chave GEMINI_API_KEY inválida. Use uma chave do Google AI Studio (iniciada com AIzaSy...) nas configurações de Environment Variables da Vercel.';
+  }
+  if (
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('Quota exceeded')
+  ) {
+    return 'Limite de cota temporariamente atingido. Tente novamente em instantes.';
+  }
+  return msg;
 }
 
 app.use(express.json({ limit: '50mb' }));
@@ -496,7 +523,7 @@ Retorne um objeto JSON contendo exatamente os seguintes campos:
 
     let rawText = '';
     const geminiAi = getGeminiClient();
-    const modelsToTry = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
     let lastError: any = null;
 
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -616,7 +643,7 @@ Retorne um objeto JSON contendo exatamente os seguintes campos:
     });
   } catch (err: any) {
     return res.status(500).json({
-      error: 'Erro ao processar leitura da foto: ' + (err.message || 'Tente novamente em instantes'),
+      error: 'Erro ao processar leitura da foto: ' + formatGeminiError(err),
     });
   }
 });
@@ -965,7 +992,7 @@ Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
 
     let rawText = '';
     const geminiAi = getGeminiClient();
-    const modelsToTry = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
     let lastError: any = null;
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -1125,7 +1152,7 @@ Retorne OBRIGATORIAMENTE um JSON puro com os seguintes campos:
     });
   } catch (err: any) {
     return res.status(500).json({
-      error: 'Erro ao comparar foto com CSV: ' + (err.message || 'Erro desconhecido'),
+      error: 'Erro ao comparar foto com CSV: ' + formatGeminiError(err),
     });
   }
 });
@@ -1181,7 +1208,7 @@ Retorne OBRIGATORIAMENTE um JSON puro com:
 
     let rawText = '';
     const geminiAi = getGeminiClient();
-    const modelsToTry = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+    const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
     let lastError: any = null;
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -1273,7 +1300,7 @@ Retorne OBRIGATORIAMENTE um JSON puro com:
     });
   } catch (err: any) {
     return res.status(500).json({
-      error: 'Erro na pesquisa por kit: ' + (err.message || 'Erro desconhecido'),
+      error: 'Erro na pesquisa por kit: ' + formatGeminiError(err),
     });
   }
 });
